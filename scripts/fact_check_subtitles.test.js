@@ -24,7 +24,7 @@ async function main() {
       verifications: {
         'FC-001': {
           webSearchUsed: true,
-          text: '[ANSWER]\nANSWER: 邓玉 -> 邓煜\nCONFIDENCE: 0.98\nREASON: 权威页面列出正确姓名\n[/ANSWER]',
+          text: '[ANSWER]\nANSWER: 邓玉 -> 邓煜\nCONFIDENCE: 0.98\nSPEECH_MATCH: homophone\nREASON: 权威页面列出正确姓名\n[/ANSWER]',
           evidence: [{ url: 'https://example.com/deng', title: '官方页面', snippet: '邓煜' }],
         },
       },
@@ -54,14 +54,15 @@ async function main() {
         'FC-001': {
           webSearchUsed: true,
           response: {
-            status: 'proposed', replacement: '王虹', confidence: 0.98,
+            status: 'proposed', replacement: '王虹', speechMatch: 'exact', confidence: 0.98,
             sources: [{ url: 'https://example.com/wang', title: '官方页面', snippet: '王虹' }],
           },
         },
       },
     }, null, 2));
     const noChange = await runFactCheck({ captionDir, mockFile: noChangeFile, maxCandidates: 20, model: '' });
-    assert.strictEqual(noChange.candidates[0].verification.status, 'verified_no_change', '原文已正确时应记录为已核验、无需修改');
+    assert.strictEqual(noChange.candidates.length, 0, '原文已正确时不得生成可审批的 FC 候选');
+    assert.strictEqual(noChange.skippedCandidates[0].status, 'verified_no_change', '原文已正确只保留在内部审计中');
 
     const unsafeFile = path.join(root, 'unsafe.json');
     fs.writeFileSync(unsafeFile, JSON.stringify({
@@ -76,15 +77,71 @@ async function main() {
         'FC-001': {
           webSearchUsed: true,
           response: {
-            status: 'proposed', replacement: '邓玉和王虹一起获奖', confidence: 0.98,
+            status: 'proposed', replacement: '邓玉和王虹一起获奖', speechMatch: 'homophone', confidence: 0.98,
             sources: [{ url: 'https://example.com/unsafe', title: '官方页面', snippet: '王虹' }],
           },
         },
       },
     }, null, 2));
     const unsafe = await runFactCheck({ captionDir, mockFile: unsafeFile, maxCandidates: 20, model: '' });
-    assert.strictEqual(unsafe.candidates[0].verification.status, 'unresolved', '句子级替换不得进入人工审批');
-    assert.match(unsafe.candidates[0].verification.reason, /短实体\/日期\/术语/);
+    assert.strictEqual(unsafe.candidates.length, 0, '句子级替换不得进入人工审批');
+    assert.match(unsafe.skippedCandidates[0].reason, /短实体\/日期\/术语/);
+
+    const fidelityCaptionDir = path.join(root, 'fidelity-4_字幕');
+    fs.mkdirSync(fidelityCaptionDir, { recursive: true });
+    fs.writeFileSync(path.join(fidelityCaptionDir, 'corrected.txt'), '吉利发布新车\n王宏获得奖项\n2049年发布\n');
+    fs.writeFileSync(path.join(fidelityCaptionDir, 'retained_transcript.json'), JSON.stringify({
+      lines: [
+        { text: '吉利发布新车', sourceStart: 0, sourceEnd: 1, sourceWordIndices: [0, 1, 2, 3, 4] },
+        { text: '王宏获得奖项', sourceStart: 1, sourceEnd: 2, sourceWordIndices: [5, 6, 7, 8, 9] },
+        { text: '2049年发布', sourceStart: 2, sourceEnd: 3, sourceWordIndices: [10, 11, 12, 13, 14, 15] },
+      ],
+    }, null, 2));
+    const fidelityFile = path.join(root, 'subtitle-fidelity.json');
+    fs.writeFileSync(fidelityFile, JSON.stringify({
+      factMap: {
+        documentBrief: '汽车 | 获奖',
+        topicKeywords: ['汽车', '获奖'],
+        candidates: [
+          { name: '吉利', type: 'COMPANY', variants: ['吉利'], risk: 'high', occurrences: [{ line: 1, mention: '吉利', before: '', after: '发布新车' }] },
+          { name: '王宏', type: 'PERSON', variants: ['王宏'], risk: 'high', occurrences: [{ line: 2, mention: '王宏', before: '', after: '获得奖项' }] },
+          { name: '2049', type: 'DATE', variants: ['2049'], risk: 'high', occurrences: [{ line: 3, mention: '2049', before: '', after: '年发布' }] },
+        ],
+      },
+      verifications: {
+        'FC-001': {
+          webSearchUsed: true,
+          response: {
+            status: 'proposed', replacement: '浙江吉利控股集团有限公司', speechMatch: 'exact', confidence: 0.99,
+            sources: [{ url: 'https://example.com/geely', title: '公司页面', snippet: '浙江吉利控股集团有限公司' }],
+          },
+        },
+        'FC-002': {
+          webSearchUsed: true,
+          response: {
+            status: 'proposed', replacement: '王虹', speechMatch: 'homophone', confidence: 0.99,
+            sources: [{ url: 'https://example.com/wang', title: '获奖名单', snippet: '王虹' }],
+          },
+        },
+        'FC-003': {
+          webSearchUsed: true,
+          response: {
+            status: 'proposed', replacement: '2048', speechMatch: 'homophone', confidence: 0.99,
+            sources: [{ url: 'https://example.com/date', title: '活动页面', snippet: '2048' }],
+          },
+        },
+      },
+    }, null, 2));
+    const fidelity = await runFactCheck({ captionDir: fidelityCaptionDir, mockFile: fidelityFile, maxCandidates: 20, model: '' });
+    assert.deepStrictEqual(fidelity.candidates.map(candidate => candidate.id), ['FC-002'], '只有同音 ASR 人名错字能进入人工确认');
+    assert.strictEqual(fidelity.candidates[0].verification.replacement, '王虹');
+    assert.strictEqual(fidelity.skippedCandidates.length, 2);
+    assert.match(fidelity.skippedCandidates.find(item => item.candidateId === 'FC-001').reason, /简称/);
+    assert.match(fidelity.skippedCandidates.find(item => item.candidateId === 'FC-003').reason, /日期或数字/);
+    const fidelityReport = fs.readFileSync(fidelity.files.report, 'utf8');
+    assert.match(fidelityReport, /FC-002/);
+    assert.doesNotMatch(fidelityReport, /吉利|2049/, '报告不得展示已过滤的简称扩写或事实改写');
+    assert.strictEqual(fs.existsSync(path.join(fidelityCaptionDir, 'fact_checked.txt')), false, '候选阶段绝不能直接改写字幕');
 
     const numberCaptionDir = path.join(root, 'number-4_字幕');
     fs.mkdirSync(numberCaptionDir, { recursive: true });
@@ -143,10 +200,11 @@ async function main() {
       model: '',
     });
     assert.strictEqual(
-      malformedAudioDecision.candidates[0].verification.status,
-      'unresolved',
+      malformedAudioDecision.candidates.length,
+      0,
       '缺失或格式错误的声学裁决不得进入人工批准'
     );
+    assert.strictEqual(malformedAudioDecision.skippedCandidates[0].status, 'unresolved');
 
     const multipleOccurrencesFile = path.join(root, 'number-multiple-occurrences.json');
     const multipleOccurrencesMock = JSON.parse(fs.readFileSync(numberMockFile, 'utf8'));
@@ -159,11 +217,11 @@ async function main() {
       model: '',
     });
     assert.strictEqual(
-      multipleOccurrences.candidates[0].verification.status,
-      'unresolved',
+      multipleOccurrences.candidates.length,
+      0,
       '一个裸数字候选对应多个位置时不得交给模型猜单位'
     );
-    assert.match(multipleOccurrences.candidates[0].verification.reason, /一个精确出现位置/);
+    assert.match(multipleOccurrences.skippedCandidates[0].reason, /一个精确出现位置/);
     console.log('fact check subtitle flow test passed');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

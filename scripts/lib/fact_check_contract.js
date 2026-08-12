@@ -14,8 +14,8 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-// v2：NUMBER 裸数字候选可携带首遍/二遍 ASR 与固定切片规则的声学复核证据。
-const SCHEMA_VERSION = 2;
+// v3：联网候选必须携带字幕保真字段 speechMatch；只把可人工批准的修改发布为 FC 候选。
+const SCHEMA_VERSION = 3;
 const ENTITY_TYPES = new Set(['PERSON', 'ORGANIZATION', 'COMPANY', 'PRODUCT', 'PLACE', 'AWARD', 'DATE', 'NUMBER', 'TERM', 'OTHER']);
 
 function fail(message) {
@@ -340,15 +340,19 @@ function normalizeVerification(rawVerification, fallbackSources) {
   const status = String(raw.status || raw.verificationStatus || '').toLowerCase();
   const answerFrom = String(raw.answerFrom || raw.sourceText || '').trim();
   const replacement = String(raw.replacement || raw.proposedText || raw.canonicalName || '').trim();
+  const speechMatch = String(raw.speechMatch || raw.speech_match || '').trim().toLowerCase();
   const confidence = Number(raw.confidence);
   const sources = normalizeSources([...(Array.isArray(raw.sources) ? raw.sources : []), ...(fallbackSources || [])]);
+  const speechPreserving = speechMatch === 'exact' || speechMatch === 'homophone';
   const validProposal = status === 'proposed'
     && replacement.length > 0
+    && speechPreserving
     && Number.isFinite(confidence)
     && confidence >= 0
     && confidence <= 1
     && sources.length > 0;
   const validNoChange = status === 'verified_no_change'
+    && ['exact', 'homophone', 'no'].includes(speechMatch)
     && Number.isFinite(confidence)
     && confidence >= 0
     && confidence <= 1
@@ -359,6 +363,7 @@ function normalizeVerification(rawVerification, fallbackSources) {
     // answerFrom / answerTo 是机器协议字段；reason 只用于人工审阅，不能决定是否应用。
     answerFrom,
     answerTo: validProposal ? replacement : '',
+    speechMatch,
     confidence: Number.isFinite(confidence) ? confidence : null,
     rationale: String(raw.rationale || raw.reason || '').trim(),
     query: String(raw.query || raw.searchQuery || '').trim(),

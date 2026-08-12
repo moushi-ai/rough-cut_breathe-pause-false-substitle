@@ -121,7 +121,7 @@ function parseVerificationText(text) {
   if (end === -1 || end <= begin) fail('缺少 [/ANSWER]');
   if (lines.slice(end + 1).some(line => line)) fail('[/ANSWER] 后不应再出现内容');
   const fields = {};
-  const allowed = new Set(['ANSWER', 'CONFIDENCE', 'REASON']);
+  const allowed = new Set(['ANSWER', 'CONFIDENCE', 'SPEECH_MATCH', 'REASON']);
   for (const line of lines.slice(begin + 1, end)) {
     if (!line) continue;
     const { key, value } = parseField(line, allowed, 'ANSWER');
@@ -135,9 +135,15 @@ function parseVerificationText(text) {
   if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
     fail('CONFIDENCE 必须是 0 到 1 的数字');
   }
-  if (fields.ANSWER.toLowerCase() === 'uncertain') {
-    return { status: 'unresolved', answerFrom: '', replacement: '', confidence, reason: fields.REASON };
+  const speechMatch = fields.SPEECH_MATCH.toLowerCase();
+  if (!new Set(['exact', 'homophone', 'no']).has(speechMatch)) {
+    fail('SPEECH_MATCH 只能是 exact、homophone 或 no');
   }
+  if (fields.ANSWER.toLowerCase() === 'uncertain') {
+    if (speechMatch !== 'no') fail('ANSWER 为 uncertain 时 SPEECH_MATCH 必须是 no');
+    return { status: 'unresolved', answerFrom: '', replacement: '', confidence, speechMatch, reason: fields.REASON };
+  }
+  if (speechMatch === 'no') fail('提出替换时 SPEECH_MATCH 必须是 exact 或 homophone');
   const match = fields.ANSWER.match(/^(.+?)\s*(?:->|→)\s*(.+?)$/);
   if (!match) fail('ANSWER 只能是“原文 -> 标准写法”或 uncertain');
   return {
@@ -145,6 +151,7 @@ function parseVerificationText(text) {
     answerFrom: match[1].trim(),
     replacement: match[2].trim(),
     confidence,
+    speechMatch,
     reason: fields.REASON,
   };
 }

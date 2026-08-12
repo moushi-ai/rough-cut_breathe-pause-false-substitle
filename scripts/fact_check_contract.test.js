@@ -52,6 +52,7 @@ try {
     verification: normalizeVerification({
       status: 'proposed',
       replacement: index === 0 ? '王虹' : '邓煜',
+      speechMatch: 'homophone',
       confidence: 0.99,
       sources: [{ url: `https://example.com/${index}`, title: '权威来源', snippet: '证据' }],
     }),
@@ -73,13 +74,18 @@ try {
   assert.deepStrictEqual(correctedNameMap.candidates[0].occurrences[0].sourceWordIndices, [0, 1], '基础纠错后的文本也必须精确回链原始逐字索引');
   assert.strictEqual(correctedNameMap.candidates[0].occurrences[0].sourceMapping, 'aligned');
 
-  const noEvidence = normalizeVerification({ status: 'proposed', replacement: '王虹', confidence: 0.99 });
+  const noEvidence = normalizeVerification({ status: 'proposed', replacement: '王虹', speechMatch: 'homophone', confidence: 0.99 });
   assert.strictEqual(noEvidence.status, 'unresolved', '没有来源时不得形成可批准提案');
   const noChange = normalizeVerification({
-    status: 'verified_no_change', confidence: 0.99,
+    status: 'verified_no_change', speechMatch: 'exact', confidence: 0.99,
     sources: [{ url: 'https://example.com/verified', title: '权威来源' }],
   });
   assert.strictEqual(noChange.status, 'verified_no_change', '有证据的无修改结论应与无法确认区分');
+  const factOnlyRewrite = normalizeVerification({
+    status: 'proposed', replacement: '2025', speechMatch: 'no', confidence: 0.99,
+    sources: [{ url: 'https://example.com/date', title: '权威来源' }],
+  });
+  assert.strictEqual(factOnlyRewrite.status, 'unresolved', '不保留原话发音的事实改写不得进入人工审批');
 
   fs.writeFileSync(path.join(captionDir, 'corrected.txt'), '王宏获得了新的奖项\n邓玉是她的同学\n');
   const changedDocument = ensureCaptionInput(captionDir);

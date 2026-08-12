@@ -404,20 +404,21 @@ node "$SKILL_DIR/scripts/extract_text.js" \
 
 > 只用于已走完「步骤 7B」的成片字幕：它需要 `retained_transcript.json` 保留的逐字时间轴，当前不对直接转字幕模式伪造时间映射。
 
-1. 输入是完整的 `$BASE_DIR/4_字幕/corrected.txt`。模型先读全文生成**短事实 brief（关键词串）+ 主题关键词 + 事实候选地图**，发现高风险的：人名、机构/公司、产品、地点、奖项、日期、数字、术语；有限核验名额必须优先给疑似 ASR 同音/形近错写和与事件名单不一致的实体，已正确事实后置。
+1. 输入是完整的 `$BASE_DIR/4_字幕/corrected.txt`。模型先读全文生成**短事实 brief（关键词串）+ 主题关键词 + 事实候选地图**，但这是“字幕保真”而非改写事实：只发现疑似 ASR 同音/形近错写，及可能漏掉 `%` 的裸数字声学歧义。已正确实体、大众认可且说话人实际使用的简称、以及只与外部事实不一致的日期/数字/单位都不列候选，绝不扩写为注册全称。
 2. **绝不把全文直接作为搜索词，也不只拿主题搜索。** 每个候选的联网查询包必须是「候选原文变体 + 文案 brief + 主题关键词 + 本地出现上下文」。
-3. 模型使用 **Doubao Seed 2.0 Lite**（配置名 `doubao-seed-2.0-lite` 会自动解析为当前 Responses API 端点 `doubao-seed-2-0-lite-260215`）和方舟内置 Web Search。模型不输出“建议”或 JSON，只填写固定标签文本；脚本严格翻译为 JSON 工件并收集 Web Search 来源。`ANSWER` 和 `CONFIDENCE` 是下游机器字段，`REASON` 只给人工审阅，不能驱动自动应用：
+3. 模型使用 **Doubao Seed 2.0 Lite**（配置名 `doubao-seed-2.0-lite` 会自动解析为当前 Responses API 端点 `doubao-seed-2-0-lite-260215`）和方舟内置 Web Search。模型不输出“建议”或 JSON，只填写固定标签文本；脚本严格翻译为 JSON 工件并收集 Web Search 来源。`ANSWER`、`CONFIDENCE`、`SPEECH_MATCH` 是下游机器字段，`REASON` 只给人工审阅，不能驱动自动应用：
 
    ```text
    [ANSWER]
    ANSWER: 邓玉 -> 邓煜
    CONFIDENCE: 0.99
+   SPEECH_MATCH: homophone
    REASON: 北大官方名单列为邓煜
    [/ANSWER]
    ```
 
-   无法确认时只把 `ANSWER` 写为 `uncertain`。答案只能替换单一、短的实体/日期/术语；句子级或越界文本会被本地合同拒绝。已证实原文无误时，报告显示 `原文 -> 原文` 且无需应用。
-4. 脚本只写入 `4_字幕/事实核验/`，**绝不修改** `corrected.txt` 或 `subtitles_formatted.md`。先把 `fact_check_candidates.md` 给用户审阅并等待明确的候选 ID 决定。
+   `SPEECH_MATCH` 只能是 `exact`（仅大小写、空格、标点）/ `homophone`（同音或形近 ASR 错字）/ `no`。无法确认时写 `ANSWER: uncertain` + `SPEECH_MATCH: no`。本地合同会拒绝全称扩写、只凭联网资料改日期/数字、以及会改变原话发音或字数的替换；正确原文和不应用项只进内部证据审计，不显示 FC 候选。
+4. 脚本只写入 `4_字幕/事实核验/`，**绝不修改** `corrected.txt` 或 `subtitles_formatted.md`。`fact_check_candidates.md` 只展示可人工批准的保真修改；先给用户审阅并等待明确的候选 ID 决定。
 
 ```bash
 # 先验证本机未提交的 ARK_API_KEY、模型、Web Search、火山引擎 Key 和声学复核依赖；不会显示 Key
