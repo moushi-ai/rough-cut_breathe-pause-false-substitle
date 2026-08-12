@@ -1,5 +1,5 @@
 ---
-name: AI剪口播
+name: ai-jian-koubo
 description: 口播视频转录和口误识别。生成审查稿和删除任务清单。触发词：剪口播、处理视频、识别口误
 ---
 
