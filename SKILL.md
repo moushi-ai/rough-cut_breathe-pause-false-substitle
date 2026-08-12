@@ -448,7 +448,7 @@ node "$SKILL_DIR/scripts/apply_fact_corrections.js" "$BASE_DIR/4_字幕"
 
 1. 读取纠错后的文本：直接模式为 `$BASE_DIR/2_纠错/corrected.txt`；审核后成片字幕在有人工批准的事实修改时读取 `$BASE_DIR/4_字幕/fact_checked.txt`，否则读取 `$BASE_DIR/4_字幕/corrected.txt`
 2. 读取 `$SKILL_DIR/用户习惯/断行prompt.md` 规则
-3. **只做格式化**，不改字、不删字、不加字
+3. **只做格式化**，不改字、不删字、不加字；默认每行最多 10 个中文字量，英文专有名词不得从单词中间强拆
 4. 输出到：直接模式为视频所在目录 `$(dirname "$VIDEO_PATH")/subtitles_formatted.md`；审核后成片字幕为 `$BASE_DIR/4_字幕/subtitles_formatted.md`
 5. 告知用户文件路径，流程结束
 
