@@ -895,7 +895,7 @@
             </div>
             <div class="knob">
               <div class="knob-head"><span>句尾</span><b id="knob-padend-val">2 帧</b></div>
-              <div class="knob-hint">每句结尾多留几帧再收，避免话没说完就被切</div>
+              <div class="knob-hint">每句结尾多留几帧再收，避免话没说完就被切；切点不会穿过识别出的字</div>
               <input type="range" id="knob-padend" min="0" max="8" step="1" value="2">
             </div>
             <div class="tightness">
@@ -1098,7 +1098,7 @@
       function recompute() {
         deleteSegs = getDeleteSegments();
         if (typeof ComputeKeeps !== 'undefined') {
-          const keeps = ComputeKeeps.computeFinalKeeps(deleteSegs, silencePeriods, duration, cutOpts);
+          const keeps = ComputeKeeps.computeFinalKeeps(deleteSegs, silencePeriods, duration, cutOpts, words);
           const cuts = ComputeKeeps.keepsToCuts(keeps, duration);
           extraCuts = ComputeKeeps.intervalSubtract(cuts, deleteSegs); // 用户没选、却被算法切掉的部分
           // 状态栏：总时长 / 剪后
@@ -1204,7 +1204,7 @@
 
         // 删除带（红）
         drawBand(deleteSegs, COL.del, COL.delEdge);
-        // 额外切掉（黄）—— 这正是「把你该说的话切掉」的高危区
+        // 额外切掉（黄）：仅显示静音/字间空隙的自动收边，不会穿过识别出的字
         drawBand(extraCuts, COL.cut, COL.cutEdge);
       }
 
@@ -1389,7 +1389,8 @@
     let cachedDeleteSegs = [];
     let segsDirty = true;
     // 播放跳段用的「实际切点」缓存：与波形 / 导出 FCPXML 同源（computeFinalKeeps），
-    // 这样预览听到的就是真正会被剪掉的内容，且切点已吸附到静音。选段或切割参数变化时失效。
+    // 这样预览听到的就是真正会被剪掉的内容，且切点已吸附到安全的字间静音。
+    // 选段或切割参数变化时失效。
     let cachedPlaybackCuts = [];
     let playbackCutsDirty = true;
     function markSegsDirty() { segsDirty = true; playbackCutsDirty = true; if (typeof wave !== 'undefined') wave.markDirty(); }
@@ -1401,7 +1402,7 @@
         // 算法未就绪或时长未知：退回原始选段，且不缓存（保持 dirty，等就绪后重算）
         return del;
       }
-      const keeps = ComputeKeeps.computeFinalKeeps(del, silencePeriods, dur, cutOpts);
+      const keeps = ComputeKeeps.computeFinalKeeps(del, silencePeriods, dur, cutOpts, words);
       cachedPlaybackCuts = ComputeKeeps.keepsToCuts(keeps, dur);
       playbackCutsDirty = false;
       return cachedPlaybackCuts;

@@ -53,6 +53,58 @@ function probeVideo(videoFile) {
   return { duration, fpsNum, fpsDen, width, height };
 }
 
+// FCP 只能落在帧上，而 ASR 的字时间戳通常不是整帧。普通四舍五入可能把
+// 「字头/字尾」推入字内部，因此按边界方向做保守量化：字头向前取整帧、
+// 字尾向后取整帧；若量化结果仍落在字内，再退回该字的安全端点。
+function quantizeBoundary(sec, side, fpsNum, fpsDen, spokenWords) {
+  const scale = fpsNum / fpsDen;
+  const frameTicks = fpsDen;
+  let ticks = Math.round(sec * scale) * frameTicks;
+  const words = Array.isArray(spokenWords)
+    ? spokenWords.filter(w => w && !w.isGap && Number.isFinite(Number(w.start)) && Number.isFinite(Number(w.end)) && Number(w.end) > Number(w.start))
+    : [];
+  const frameSec = fpsDen / fpsNum;
+  const near = frameSec + 1e-6;
+
+  // 同一时间附近可能同时是「前一个字尾」和「后一个字头」。优先按
+  // 当前片段真正要保留的那一侧处理：起点优先字头，终点优先字尾。
+  const edge = side === 'start' ? 'start' : 'end';
+  let matched = false;
+  const nearestEdge = (name) => {
+    let best = null;
+    for (const word of words) {
+      const point = Number(word[name]);
+      const distance = Math.abs(sec - point);
+      if (distance <= near && (!best || distance < best.distance)) best = { point, distance };
+    }
+    return best;
+  };
+  const primary = nearestEdge(edge);
+  if (primary) {
+    ticks = (side === 'start' ? Math.floor(primary.point * scale) : Math.ceil(primary.point * scale)) * frameTicks;
+    matched = true;
+  }
+  if (!matched) {
+    const otherEdge = side === 'start' ? 'end' : 'start';
+    const secondary = nearestEdge(otherEdge);
+    if (secondary) {
+      ticks = (side === 'start' ? Math.ceil(secondary.point * scale) : Math.floor(secondary.point * scale)) * frameTicks;
+      matched = true;
+    }
+  }
+
+  const quantizedSec = ticks / scale;
+  for (const word of words) {
+    const start = Number(word.start);
+    const end = Number(word.end);
+    if (start < quantizedSec && quantizedSec < end) {
+      ticks = (side === 'start' ? Math.floor(start * scale) : Math.ceil(end * scale)) * frameTicks;
+      break;
+    }
+  }
+  return ticks;
+}
+
 /**
  * 生成 FCPXML。
  * @param {object} o
@@ -60,17 +112,20 @@ function probeVideo(videoFile) {
  * @param {number[]} o.deleteList      删除段（秒区间，见 compute_keeps）
  * @param {Array} o.silencePeriods     预计算静音段
  * @param {object} [o.cutOpts]         切割参数（padStart/padEnd 等）
+ * @param {{start:number,end:number,isGap?:boolean}[]} [o.spokenWords]
+ *                                      逐字时间轴，用于保证切点不穿字
  * @returns {{ xml:string, outputPath:string, finalKeeps:Array, baseName:string }}
  */
-function buildFcpxml({ videoFile, deleteList, silencePeriods, cutOpts }) {
+function buildFcpxml({ videoFile, deleteList, silencePeriods, cutOpts, spokenWords }) {
   const { duration, fpsNum, fpsDen, width, height } = probeVideo(videoFile);
 
   // ticks = 帧号 × fpsDen，分母为 fpsNum：对 29.97/30/24 等所有帧率都成立
-  const toFCPTicks = (sec) => Math.round(sec * fpsNum / fpsDen) * fpsDen;
+  const toStartTicks = (sec) => quantizeBoundary(sec, 'start', fpsNum, fpsDen, spokenWords);
+  const toEndTicks = (sec) => quantizeBoundary(sec, 'end', fpsNum, fpsDen, spokenWords);
   const frameDuration = `${fpsDen}/${fpsNum}s`;
 
   // 切割算法单一来源：合并删除段 → 取反 → 边界吸附静音 → 内部长静音二次切
-  const finalKeeps = computeFinalKeeps(deleteList, silencePeriods, duration, cutOpts);
+  const finalKeeps = computeFinalKeeps(deleteList, silencePeriods, duration, cutOpts, spokenWords);
 
   const baseName = path.basename(videoFile, path.extname(videoFile));
   const outputPath = path.resolve(`${baseName}_cut.fcpxml`);
@@ -84,13 +139,29 @@ function buildFcpxml({ videoFile, deleteList, silencePeriods, cutOpts }) {
 
   // 每个保留片段一个 asset-clip，引用同一个 asset r1；
   // offset 在 tick 空间累加，避免浮点秒累积误差导致 ±1 帧偏移
+  // 每个源片段的 start/end 分别量化到帧后，修复相邻片段因独立四舍五入
+  // 产生的 1 帧重叠。duration 必须用量化后的 end-start 计算，不能再对
+  // (end-start) 独立四舍五入，否则时间线上会出现重复帧/极短断点。
+  const quantizedKeeps = [];
+  for (const seg of finalKeeps) {
+    let startTicks = toStartTicks(seg.start);
+    let endTicks = toEndTicks(seg.end);
+    if (endTicks <= startTicks) continue;
+    const previous = quantizedKeeps[quantizedKeeps.length - 1];
+    if (previous && startTicks < previous.endTicks) {
+      // 保守地把后一个片段推到前一个片段结束处：最多吸收一个量化帧，
+      // 但不会在时间线上重复播放同一帧，也不会制造极短的回跳。
+      startTicks = previous.endTicks;
+    }
+    if (endTicks > startTicks) quantizedKeeps.push({ startTicks, endTicks });
+  }
+
   let timelineOffsetTicks = 0;
-  const clips = finalKeeps.map((seg) => {
-    const startTicks = toFCPTicks(seg.start);
-    const durTicks = toFCPTicks(seg.end - seg.start);
+  const clips = quantizedKeeps.map((seg) => {
+    const durTicks = seg.endTicks - seg.startTicks;
     const offsetTicks = timelineOffsetTicks;
     timelineOffsetTicks += durTicks;
-    return `            <asset-clip name="${baseName}" offset="${offsetTicks}/${fpsNum}s" ref="r1" start="${startTicks}/${fpsNum}s" duration="${durTicks}/${fpsNum}s" audioRole="dialogue" format="r2" tcFormat="NDF" />`;
+    return `            <asset-clip name="${baseName}" offset="${offsetTicks}/${fpsNum}s" ref="r1" start="${seg.startTicks}/${fpsNum}s" duration="${durTicks}/${fpsNum}s" audioRole="dialogue" format="r2" tcFormat="NDF" />`;
   }).join('\n');
 
   const totalTicks = timelineOffsetTicks;
@@ -114,7 +185,7 @@ ${clips}
   </library>
 </fcpxml>`;
 
-  return { xml, outputPath, finalKeeps, baseName };
+  return { xml, outputPath, finalKeeps, quantizedKeeps, baseName };
 }
 
 module.exports = { buildFcpxml };

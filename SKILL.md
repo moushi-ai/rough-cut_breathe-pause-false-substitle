@@ -246,6 +246,12 @@ bash "$SKILL_DIR/scripts/serve_review.sh" \
   "$BASE_DIR/3_审核" "$VIDEO_PATH" "$SKILL_DIR/scripts/review_server.js"
 ```
 
+### 剪切安全规则（生产默认）
+
+审核页和 FCPXML 导出共用 `scripts/lib/compute_keeps.js`。生成的静音/换气候选会先与逐字时间轴求交，只保留字与字之间的空隙；句头/句尾余量也会受字边界保护。因此任何自动吸附或内部静音切割都不能落在一个正在发音的字中间。若 ASR 的字时间戳不准，默认宁可少切一点静音，也不切断发音。
+
+导出时源片段再统一量化到视频帧，并修复相邻片段的 1 帧重叠，避免导入剪映/Final Cut 后出现重复帧或突兀断点。
+
 > **⚠️ 为什么必须用 `serve_review.sh`，不能直接后台 `&`/nohup 挂服务（重要，否则用户会「拒绝连接」）：**
 > 审核网页要这个本地服务**一直监听端口**。但各 agent 对后台进程的处理不同：
 > - **Claude Code** 有常驻进程管理器，会在整个会话期间替你保活后台进程 → 直接 `&` 也没事；
@@ -326,4 +332,3 @@ VOLCENGINE_API_KEY=your_api_key_here
 去[新版控制台](https://console.volcengine.com/speech/new/overview)生成 **一个** API Key 即可——所有引擎共用这同一个 `VOLCENGINE_API_KEY`（均为新版控制台单 `X-Api-Key` 认证）。
 
 默认 `auto` 轮流模式会交替用极速版和标准版，**需同时开通两个资源**：「录音文件识别 - 极速版」（`volc.bigasr.auc_turbo`）+「录音文件识别 - 标准版」（`volc.bigasr.auc`）。两者各有 20h 免费额度、各自独立抵扣，轮流即可吃满 ≈40h。若只想/只开通了其中一个资源，加 `--flash` 或 `--v3-standard` 固定使用。
-

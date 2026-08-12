@@ -137,6 +137,7 @@ const server = http.createServer((req, res) => {
           deleteList,
           silencePeriods,
           cutOpts,
+          spokenWords: reviewWords,
         });
 
         fs.writeFileSync(outputFcpxml, xml);
