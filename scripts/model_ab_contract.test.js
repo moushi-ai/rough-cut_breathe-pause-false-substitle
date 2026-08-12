@@ -36,6 +36,7 @@ try {
     'scripts/merge_selections.js',
     'scripts/generate_review.js',
     'scripts/review_server.js',
+    'scripts/extract_retained_transcript.js',
     'scripts/lib/compute_keeps.js',
     'scripts/lib/fcpxml.js',
   ];

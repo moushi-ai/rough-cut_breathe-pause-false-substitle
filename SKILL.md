@@ -19,9 +19,11 @@ description: 口播视频转录和口误识别。生成审查稿和删除任务�
 output/YYYY-MM-DD_HH-MM_视频名/剪口播/
 ├── 1_转录/   audio.mp3 · volcengine_v3_result.json · subtitles_words.json
 ├── 2_分析/   analysis.txt · sentence_map.json · restart_candidates.json · speech_errors.json · auto_selected.json
-└── 3_审核/   review.html · audio.mp3 · data.json · silence_periods.json
-                <视频名>_cut.fcpxml   ← 网页点击「导出 FCPXML」后生成在此目录
-                                       拖入剪映 / Final Cut Pro 完成最终剪辑
+├── 3_审核/   review.html · audio.mp3 · data.json · silence_periods.json · review_log.json
+│               <视频名>_cut.fcpxml   ← 网页点击「导出 FCPXML」后生成在此目录
+│                                      拖入剪映 / Final Cut Pro 完成最终剪辑
+└── 4_字幕/   retained_raw.txt · retained_transcript.json · corrected.txt · uncertain.md
+                subtitles_formatted.md ← 仅含审核后成片保留的台词
 ```
 
 **模式 B（转字幕）：**
@@ -51,6 +53,7 @@ output/YYYY-MM-DD_HH-MM_视频名/剪口播/
   7A. 完整模型 A/B（用户显式确认时：两个 ASR 均跑 5.1–7，再盲审比较）
   【等待用户确认】→ 网页点击「导出 FCPXML」→ 拖入剪映 / Final Cut Pro 完成剪辑
        （导出同时写 3_审核/review_log.json，供步骤 8 学习）
+  7B. 成片字幕（用户要求字幕时：先提取审核后保留台词，再纠错、断行）
   8. 自进化学习（用户显式触发「已导出，学一下」）→ diff 抽规则 → 确认 → 写 经验规则.md → 团队 Git 沉淀
 
 模式 B（转字幕）:
@@ -322,6 +325,23 @@ bash "$SKILL_DIR/scripts/serve_review.sh" \
 > AI 初选 idx、用户最终 idx、切割参数，以及二者**词级 diff**（带文字+句子上下文）。
 > 这是步骤 8「自进化学习」的唯一原料，**不读 `.fcpxml`**（那是算完的时间线，丢失了词级选择）。
 
+### 步骤 7B：从审核结果导出成片字幕
+
+> 当用户要的是**已经审核、已经剪掉口误后的成片字幕**时，不能回到 `1_转录/subtitles_words.json` 直接全文导出。必须先有本次审核的 `review_log.json`，再从其中的 `finalSelected` 提取保留台词。
+
+```bash
+node "$SKILL_DIR/scripts/extract_retained_transcript.js" \
+  "$BASE_DIR/3_审核"
+# 输出: $BASE_DIR/4_字幕/retained_raw.txt
+#       $BASE_DIR/4_字幕/retained_transcript.json
+```
+
+脚本保留原始逐字 idx 与时间轴不变，只在新的字幕文本层排除最终选中的台词；审核时只选中的静音段不会误删文字。若缺少 `review_log.json` 或其中没有 `finalSelected`，**停止并提示用户先在审核页导出**，不得退回完整原始 ASR。
+
+然后按下方「模式 B」的 B-2、B-3 继续，但输入改为 `$BASE_DIR/4_字幕/retained_raw.txt`，输出改为同目录下的 `corrected.txt`、`uncertain.md` 与 `subtitles_formatted.md`。
+
+> 本阶段不自动全篇替换人名或专有名词。词形不确定时保留 ASR 原文并写入 `uncertain.md`；只有用户后续明确确认术语映射，才可增加项目术语校对步骤。
+
 ### 步骤 8: 自进化学习（用户显式触发）
 
 > **不自动跑。** 用户导出后，在**任意会话**说「<项目> 已导出，学一下」之类，才执行本步。
@@ -357,6 +377,8 @@ bash "$SKILL_DIR/scripts/serve_review.sh" \
 
 > 步骤 1-4 完成后，如果用户选了模式 B，执行以下步骤。
 > **两步拆分**：先纠错，再断行。两步必须分开进行，不要混为一步。
+>
+> 若字幕来自已审核的剪口播项目，优先走「步骤 7B」，并把 `$BASE_DIR/4_字幕/retained_raw.txt` 作为本节输入；不得重新从完整原始 ASR 提取。
 
 #### B-1 提取纯文本（脚本执行）
 
@@ -369,18 +391,18 @@ node "$SKILL_DIR/scripts/extract_text.js" \
 
 #### B-2 第一步：纠错（AI 处理）
 
-1. 读取 `$BASE_DIR/1_转录/raw_text.txt`
+1. 读取输入文本：直接转字幕模式为 `$BASE_DIR/1_转录/raw_text.txt`；审核后成片字幕为 `$BASE_DIR/4_字幕/retained_raw.txt`
 2. 读取 `$SKILL_DIR/用户习惯/纠错prompt.md` 规则
 3. **只做纠错**，不断行、不去标点、不改格式
-4. 输出到 `$BASE_DIR/2_纠错/corrected.txt`（每行一句，与输入 1:1 对应）
-5. 如有「不确定清单」，输出到 `$BASE_DIR/2_纠错/uncertain.md` 并在对话中列出给用户
+4. 输出到与输入同一流程的纠错目录：直接模式为 `$BASE_DIR/2_纠错/corrected.txt`；审核后成片字幕为 `$BASE_DIR/4_字幕/corrected.txt`（每行一句，与输入 1:1 对应）
+5. 如有「不确定清单」，输出到同目录 `uncertain.md` 并在对话中列出给用户。人名、专有名词不确定时保留原 ASR，不得猜测后全篇替换。
 
 #### B-3 第二步：断行（AI 处理）
 
-1. 读取 `$BASE_DIR/2_纠错/corrected.txt`
+1. 读取纠错后的文本：直接模式为 `$BASE_DIR/2_纠错/corrected.txt`；审核后成片字幕为 `$BASE_DIR/4_字幕/corrected.txt`
 2. 读取 `$SKILL_DIR/用户习惯/断行prompt.md` 规则
 3. **只做格式化**，不改字、不删字、不加字
-4. 输出到**视频所在目录**：`$(dirname "$VIDEO_PATH")/subtitles_formatted.md`
+4. 输出到：直接模式为视频所在目录 `$(dirname "$VIDEO_PATH")/subtitles_formatted.md`；审核后成片字幕为 `$BASE_DIR/4_字幕/subtitles_formatted.md`
 5. 告知用户文件路径，流程结束
 
 ---
