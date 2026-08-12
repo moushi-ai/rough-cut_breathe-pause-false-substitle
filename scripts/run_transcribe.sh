@@ -8,6 +8,7 @@
 #                 （需在控制台同时开通极速版 auc_turbo 与标准版 auc 两个资源）
 #   --flash       只用极速版 auc_turbo（一次直出、最快；只开了一个资源时用这个）
 #   --v3-standard 只用标准版 auc（异步 submit/query 轮询）
+#   --seedasr2    只用录音文件识别 2.0（SeedASR，异步 submit/query 轮询）
 #
 # 输出: base_output_dir/1_转录/
 #   ├── audio.mp3
@@ -26,12 +27,13 @@ for arg in "$@"; do
   case "$arg" in
     --v3-standard) ENGINE="v3-standard" ;;
     --flash)       ENGINE="flash" ;;
+    --seedasr2)    ENGINE="seedasr2" ;;
     --auto)        ENGINE="auto" ;;
   esac
 done
 
 if [ -z "$VIDEO_PATH" ]; then
-  echo "用法: $0 <video.mp4> [base_output_dir] [--flash|--v3-standard]"
+  echo "用法: $0 <video.mp4> [base_output_dir] [--flash|--v3-standard|--seedasr2]"
   exit 1
 fi
 
@@ -84,6 +86,10 @@ case "$ENGINE" in
     ;;
   v3-standard)
     bash "$SKILL_DIR/scripts/volcengine_v3_transcribe.sh" "$TRANSCRIBE_DIR/audio.mp3" "$TRANSCRIBE_DIR"
+    RESULT_FILE="$TRANSCRIBE_DIR/volcengine_v3_result.json"
+    ;;
+  seedasr2)
+    bash "$SKILL_DIR/scripts/volcengine_seedasr2_transcribe.sh" "$TRANSCRIBE_DIR/audio.mp3" "$TRANSCRIBE_DIR"
     RESULT_FILE="$TRANSCRIBE_DIR/volcengine_v3_result.json"
     ;;
   *)

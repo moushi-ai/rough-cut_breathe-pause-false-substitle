@@ -945,6 +945,8 @@
     let autoSelected = new Set();
     const selected = new Set();
     const aiSelectedIds = new Set();
+    let reviewStartedAt = null;
+    let reviewEditCount = 0;
 
     const video = document.getElementById('player');
     const timeCur = document.getElementById('timeCur');
@@ -992,6 +994,8 @@
       .then(async (data) => {
         words = data.words || [];
         autoSelected = new Set(data.autoSelected || []);
+        reviewStartedAt = new Date().toISOString();
+        reviewEditCount = 0;
         autoSelected.forEach(idx => {
           const id = 'word-' + idx;
           selected.add(id);
@@ -1562,6 +1566,7 @@
     function pushUndo() {
       undoStack.push(new Set(selected));
       if (undoStack.length > 100) undoStack.shift();
+      if (reviewStartedAt) reviewEditCount += 1;
     }
     function undo() {
       if (!undoStack.length) return;
@@ -1570,6 +1575,7 @@
       prev.forEach(id => selected.add(id));
       markSegsDirty();
       refreshSelectionStyles();
+      if (reviewStartedAt) reviewEditCount += 1;
     }
 
     // 只更新词/气口的 selected/ai-selected class，不重建 DOM
@@ -1863,11 +1869,21 @@
         .map(id => parseInt(id.replace('word-', ''), 10))
         .filter(n => !Number.isNaN(n))
         .sort((a, b) => a - b);
+      const exportedAt = new Date();
+      const reviewStartMs = reviewStartedAt ? Date.parse(reviewStartedAt) : NaN;
+      const reviewSession = {
+        startedAt: reviewStartedAt,
+        exportedAt: exportedAt.toISOString(),
+        durationSeconds: Number.isFinite(reviewStartMs)
+          ? Math.max(0, Math.round((exportedAt.getTime() - reviewStartMs) / 1000))
+          : null,
+        editCount: reviewEditCount,
+      };
       try {
         const res = await fetch('/api/fcpxml', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ deleteList: segments, opts: cutOpts, finalSelected })
+          body: JSON.stringify({ deleteList: segments, opts: cutOpts, finalSelected, reviewSession })
         });
         const data = await res.json();
         if (data.success) {

@@ -52,6 +52,39 @@ try {
   console.warn('⚠️ 读取 data.json 失败，导出时将无法生成 review_log.json（自进化学习日志）');
 }
 
+// 完整模型 A/B 会在审核目录写入仅含 A/B 标签的元数据。它不影响普通审核，
+// 但可让 compare_model_ab.js 在导出后可靠配对两份 review_log。
+let abReviewMeta = null;
+try {
+  const meta = JSON.parse(fs.readFileSync('ab_review_meta.json', 'utf8'));
+  if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
+    abReviewMeta = {
+      runId: typeof meta.runId === 'string' ? meta.runId : null,
+      variant: typeof meta.variant === 'string' ? meta.variant : null,
+      displayLabel: typeof meta.displayLabel === 'string' ? meta.displayLabel : null,
+      reviewMode: typeof meta.reviewMode === 'string' ? meta.reviewMode : null,
+    };
+  }
+} catch (_) {
+  // 普通单模型审核没有该文件，保持兼容。
+}
+
+function sanitizeReviewSession(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const startedAt = typeof value.startedAt === 'string' && !Number.isNaN(Date.parse(value.startedAt))
+    ? value.startedAt : null;
+  const exportedAt = typeof value.exportedAt === 'string' && !Number.isNaN(Date.parse(value.exportedAt))
+    ? value.exportedAt : null;
+  const duration = Number(value.durationSeconds);
+  const editCount = Number(value.editCount);
+  return {
+    startedAt,
+    exportedAt,
+    durationSeconds: Number.isFinite(duration) && duration >= 0 && duration <= 172800 ? duration : null,
+    editCount: Number.isInteger(editCount) && editCount >= 0 && editCount <= 100000 ? editCount : null,
+  };
+}
+
 const MIME_TYPES = {
   '.html': 'text/html',
   '.js': 'application/javascript',
@@ -130,6 +163,7 @@ const server = http.createServer((req, res) => {
         const deleteList = Array.isArray(parsed) ? parsed : (parsed.deleteList || []);
         const cutOpts = (parsed && !Array.isArray(parsed) && parsed.opts) ? parsed.opts : undefined;
         const finalSelected = (parsed && !Array.isArray(parsed) && Array.isArray(parsed.finalSelected)) ? parsed.finalSelected : null;
+        const reviewSession = (parsed && !Array.isArray(parsed)) ? sanitizeReviewSession(parsed.reviewSession) : null;
 
         // FCPXML 生成（含 ffprobe 探测 + 切割算法）抽到 lib/fcpxml.js，便于单测
         const { xml, outputPath: outputFcpxml, finalKeeps, baseName } = buildFcpxml({
@@ -178,9 +212,12 @@ const server = http.createServer((req, res) => {
               video: baseName,
               exportedAt: new Date().toISOString(),
               opts: cutOpts || null,
+              deleteList: Array.isArray(deleteList) ? deleteList : [],
               aiSelected: aiSelectedIdx,
               finalSelected,
               segments: finalKeeps.length,
+              reviewSession,
+              ab: abReviewMeta,
               diff: {
                 说明: 'aiOnly=AI想删但你保留了(可能AI过删，该收敛规则)；userOnly=你删了但AI没想到(可能AI漏删，该补规则)',
                 aiOnly: aiOnly.map(entry),

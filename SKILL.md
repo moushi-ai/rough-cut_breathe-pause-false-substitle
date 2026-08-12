@@ -48,9 +48,10 @@ output/YYYY-MM-DD_HH-MM_视频名/剪口播/
   5.5 AI 逐句扫剩余词级口癖（B2/B3/B4，脚本覆盖不到的部分）
   5.6 merge_selections.js
   6-7. 生成审核网页 + 启动服务器
+  7A. 完整模型 A/B（用户显式确认时：两个 ASR 均跑 5.1–7，再盲审比较）
   【等待用户确认】→ 网页点击「导出 FCPXML」→ 拖入剪映 / Final Cut Pro 完成剪辑
        （导出同时写 3_审核/review_log.json，供步骤 8 学习）
-  8. 自进化学习（用户显式触发「已导出，学一下」）→ diff 抽规则 → 确认 → 写 经验规则.md
+  8. 自进化学习（用户显式触发「已导出，学一下」）→ diff 抽规则 → 确认 → 写 经验规则.md → 团队 Git 沉淀
 
 模式 B（转字幕）:
   B-1 提取纯文本
@@ -135,6 +136,7 @@ bash "$SKILL_DIR/scripts/run_transcribe.sh" "$VIDEO_PATH" "$BASE_DIR"
 # 可选引擎（只开了一个资源、或想固定用某个时加）:
 #   --flash        只用极速版（一次直出、最快）
 #   --v3-standard  只用标准版（异步 submit/query 轮询）
+#   --seedasr2     只用录音文件识别 2.0（SeedASR，需单独开通 2.0 资源）
 ```
 
 ### 步骤 5: 生成分析文件 + 口误识别
@@ -246,6 +248,52 @@ bash "$SKILL_DIR/scripts/serve_review.sh" \
   "$BASE_DIR/3_审核" "$VIDEO_PATH" "$SKILL_DIR/scripts/review_server.js"
 ```
 
+### 步骤 7A：完整模型 A/B（显式确认后才运行）
+
+> 只在用户明确要求比较不同 ASR 的**完整剪口播效果**时运行。不能拿「1.0 完整链路」和「2.0 裸转录」比较；两组必须只替换 ASR，其余规则、口误分析、审核和切点参数完全相同。
+
+1. **先验证资源**：录音文件识别 2.0 是可选资源，完整 A/B 前运行：
+
+   ```bash
+   node "$SKILL_DIR/scripts/doctor.js" --ab
+   ```
+
+   若 2.0 未开通，停在此处引导用户开通；不得悄悄把 B 回退为 1.0。
+
+2. **建立两组隔离工件**：同一源视频只抽一次共享音频，A=当前 1.0 Flash、B=录音文件识别 2.0。运行：
+
+   ```bash
+   bash "$SKILL_DIR/scripts/run_model_ab.sh" \
+     "$VIDEO_PATH" "$AB_DIR"
+   ```
+
+   输出的 `manifest.json` 会冻结视频/音频哈希、Git 版本、`规则.md`、`经验规则.md` 和 `SKILL.md` 快照。脚本只生成两组 `analysis.txt`，**不会**把空的 `auto_selected.json` 直接送入审核页。
+
+3. **同一口误分析层必须跑两次**：对 `A/2_分析/analysis.txt` 和 `B/2_分析/analysis.txt` 分别读取 `$AB_DIR/contract/` 中冻结的规则，按步骤 5.3–5.5 各自写 `speech_errors.json`。不得复制另一组的 idx，因为 ASR 的分词和句界不同。
+
+   分析完成后，为每组显式落完成标记：
+
+   ```bash
+   node "$SKILL_DIR/scripts/mark_model_ab_analysis_complete.js" "$AB_DIR/A/2_分析" coding-agent
+   node "$SKILL_DIR/scripts/mark_model_ab_analysis_complete.js" "$AB_DIR/B/2_分析" coding-agent
+   ```
+
+4. **生成盲审页**：
+
+   ```bash
+   bash "$SKILL_DIR/scripts/complete_model_ab.sh" "$VIDEO_PATH" "$AB_DIR"
+   ```
+
+   此步才会对 A/B 都运行 `auto_filler.js → merge_selections.js → generate_review.js`。审核页只显示 A/B 标签，不显示模型身份；用户都审核、导出 FCPXML 后，才运行：
+
+   ```bash
+   node "$SKILL_DIR/scripts/compare_model_ab.js" "$AB_DIR"
+   ```
+
+5. **按源时间轴判分**：比较脚本把每组的候选和最终选择映射为源视频时间区间，输出候选精确率、召回率、人工撤销/补删、审核时长和切点安全。不得直接比较词级 idx；两组的 idx 不可比。任何一组出现保留发音被切断或保留片段重叠，本次 A/B 无效，不得据此切换默认模型。
+
+6. **模型切换是独立决策**：A/B 的结果只产生证据，不自动改 `run_transcribe.sh` 的默认 `auto`。至少复核普通口播、专有名词、真实口误三类样本后，再由用户确认是否切换默认模型。
+
 ### 剪切安全规则（生产默认）
 
 审核页和 FCPXML 导出共用 `scripts/lib/compute_keeps.js`。生成的静音/换气候选会先与逐字时间轴求交，只保留字与字之间的空隙；句头/句尾余量也会受字边界保护。因此任何自动吸附或内部静音切割都不能落在一个正在发音的字中间。若 ASR 的字时间戳不准，默认宁可少切一点静音，也不切断发音。
@@ -288,6 +336,19 @@ bash "$SKILL_DIR/scripts/serve_review.sh" \
 5. **列给用户确认**：把候选的【新增 / 细化已有 / 合并重复 / 改某条】列出来，**等用户确认**。
 6. **写入**：确认后才改 `用户习惯/经验规则.md`，每条带出处标签 `（学于 <视频名> YYYY-MM-DD；已确认）`。
    下次步骤 5.2 即生效。
+7. **团队 Git 沉淀**：若当前使用的是团队仓库工作副本，先校验再提交。只提交规则文件，绝不提交视频、音频、转写结果、审核日志或 API Key：
+
+   ```bash
+   node "$SKILL_DIR/scripts/validate_experience_rules.js" \
+     "$SKILL_DIR/用户习惯/经验规则.md" --require-confirmed
+
+   bash "$SKILL_DIR/scripts/submit_experience.sh" "<来源视频或本次学习主题>"
+   ```
+
+   `submit_experience.sh` 会拒绝未确认规则、疑似凭证和已暂存的无关文件；它只创建并推送
+   `用户习惯/经验规则.md` 的独立 `learn:` commit。若同事没有远程写权限，脚本会保留本地
+   commit 而不会 pull、rebase 或 force push；由仓库维护者按团队协作流程处理。Git commit 的作者
+   即为本次经验贡献者。
 
 ### 模式 B: 转字幕
 

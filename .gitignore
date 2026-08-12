@@ -13,6 +13,7 @@ review_server.log
 # 转录 / 运行产物（用户跑流程时生成，不应进仓库）
 *_result.json
 *_cut.fcpxml
+.ai-workspace/
 
 # 本机测试视频与个人数据
 test_video/

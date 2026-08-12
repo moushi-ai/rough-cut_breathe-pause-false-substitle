@@ -6,6 +6,7 @@
  *   node doctor.js            正常自检；全绿则写 .setup_done，下次自动跳过
  *   node doctor.js --force    忽略 .setup_done，强制重新检测
  *   node doctor.js --json     额外在末尾输出一行 JSON（给上层程序解析）
+ *   node doctor.js --ab       额外检查录音文件识别 2.0（完整模型 A/B 前必跑）
  *
  * 退出码: 0 = 全部通过；1 = 有未通过项（需引导用户修复）
  *
@@ -40,6 +41,7 @@ const RECOMMEND_ENV = path.join(SKILL_DIR, '.env');
 const args = process.argv.slice(2);
 const FORCE = args.includes('--force');
 const JSON_OUT = args.includes('--json');
+const AB_MODE = args.includes('--ab');
 
 // ── 终端着色（Windows 新终端也支持 ANSI）─────────────────
 const useColor = process.stdout.isTTY;
@@ -52,7 +54,7 @@ const C = {
 const OK = C.green('✅'), BAD = C.red('❌'), WARN = C.yellow('⚠️ ');
 
 // ── 已配置则快速跳过（除非 --force）──────────────────────
-if (!FORCE && fs.existsSync(SENTINEL)) {
+if (!FORCE && !AB_MODE && fs.existsSync(SENTINEL)) {
   console.log(`${OK} 环境已配置完成（${C.dim('如需重新检测：node doctor.js --force')}）`);
   process.exit(0);
 }
@@ -153,7 +155,7 @@ function checkEnv() {
   console.log(C.bold('\n[2/3] API Key 凭证'));
   const r = readKey();
   if (r.state === 'ok') {
-    console.log(`  ${OK} 找到 VOLCENGINE_API_KEY（${C.dim(r.key.slice(0, 8) + '…')}，来自 ${r.source}）`);
+    console.log(`  ${OK} 找到 VOLCENGINE_API_KEY（来自 ${r.source}；为安全起见不显示任何字符）`);
     return r;
   }
   const msg = {
@@ -168,7 +170,7 @@ function checkEnv() {
   return r;
 }
 
-// ── 第三层：联网实测 key + 两个资源 ──────────────────────
+// ── 第三层：联网实测 key + 基础资源（A/B 时额外测 2.0）──────
 // 只发极小假音频，看鉴权层状态码：
 //   45000010 → key 无效；45000151 → 该资源未开通；其它 → 鉴权通过
 function ping(apiKey, resourceId, urlPath) {
@@ -221,13 +223,18 @@ function interpret(name, openHint, r) {
 }
 
 async function checkResources(apiKey) {
-  console.log(C.bold('\n[3/3] 联网实测（key + 两个资源）'));
-  const [flash, std] = await Promise.all([
+  console.log(C.bold(`\n[3/3] 联网实测（key + ${AB_MODE ? '三个资源' : '两个基础资源'}）`));
+  const checks = [
     ping(apiKey, 'volc.bigasr.auc_turbo', '/api/v3/auc/bigmodel/recognize/flash'),
     ping(apiKey, 'volc.bigasr.auc', '/api/v3/auc/bigmodel/submit'),
-  ]);
+  ];
+  if (AB_MODE) checks.push(ping(apiKey, 'volc.seedasr.auc', '/api/v3/auc/bigmodel/submit'));
+  const [flash, std, seedasr2] = await Promise.all(checks);
   const rf = interpret('极速版 auc_turbo', '「录音文件识别-极速版」', flash);
   const rs = interpret('标准版 auc', '「录音文件识别-标准版」', std);
+  const r2 = AB_MODE
+    ? interpret('录音文件识别 2.0', '「录音文件识别 2.0」', seedasr2)
+    : 'not_checked';
   if (rf === 'badkey' || rs === 'badkey') {
     console.log(C.dim('   两个引擎共用同一个 key；key 无效会一起失败。'));
   }
@@ -235,7 +242,7 @@ async function checkResources(apiKey) {
     console.log(C.dim('   提示：默认 auto 轮流需两个资源都开通才能吃满 ≈40h；'));
     console.log(C.dim('   只想用一个，转录时加 --flash 或 --v3-standard 即可。'));
   }
-  return { flash: rf, std: rs };
+  return { flash: rf, std: rs, seedasr2: r2 };
 }
 
 // ── 主流程 ───────────────────────────────────────────────
@@ -257,7 +264,7 @@ async function checkResources(apiKey) {
 
   const depsOk = missingDeps.length === 0;
   const envOk = env.state === 'ok';
-  const resOk = !!res && res.flash === 'ok' && res.std === 'ok';
+  const resOk = !!res && res.flash === 'ok' && res.std === 'ok' && (!AB_MODE || res.seedasr2 === 'ok');
   const allGreen = depsOk && envOk && resOk;
 
   console.log(C.bold('\n── 结论 ' + '─'.repeat(28)));
@@ -278,7 +285,8 @@ async function checkResources(apiKey) {
   if (JSON_OUT) {
     console.log('__DOCTOR_JSON__ ' + JSON.stringify({
       allGreen, depsOk, missingDeps, envState: env.state,
-      flash: res && res.flash, std: res && res.std, platform: process.platform,
+      flash: res && res.flash, std: res && res.std, seedasr2: res && res.seedasr2,
+      abMode: AB_MODE, platform: process.platform,
     }));
   }
   process.exit(allGreen ? 0 : 1);
