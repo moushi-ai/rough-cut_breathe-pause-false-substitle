@@ -18,7 +18,7 @@ description: 口播视频转录和口误识别。生成审查稿和删除任务�
 ```
 output/YYYY-MM-DD_HH-MM_视频名/剪口播/
 ├── 1_转录/   audio.mp3 · volcengine_v3_result.json · subtitles_words.json
-├── 2_分析/   analysis.txt · sentence_map.json · speech_errors.json · auto_selected.json
+├── 2_分析/   analysis.txt · sentence_map.json · restart_candidates.json · speech_errors.json · auto_selected.json
 └── 3_审核/   review.html · audio.mp3 · data.json · silence_periods.json
                 <视频名>_cut.fcpxml   ← 网页点击「导出 FCPXML」后生成在此目录
                                        拖入剪映 / Final Cut Pro 完成最终剪辑
@@ -41,11 +41,11 @@ output/YYYY-MM-DD_HH-MM_视频名/剪口播/
 1-4. run_transcribe.sh（自动，两模式共用）
 
 模式 A（剪口播）:
-  5.1 gen_analysis.js
-  5.2 读规则.md + analysis.txt
+  5.1 gen_analysis.js（含同句 / 邻句重说待审线索）
+  5.2 读规则.md + 经验规则.md + analysis.txt + restart_candidates.json
   5.3 AI 判断整句口误 → speech_errors.json（只填 delete_sentences）
   5.4 auto_filler.js → 自动补充词级口癖 idx（快速预筛）
-  5.5 AI 逐句扫剩余词级口癖（B2/B3/B4，脚本覆盖不到的部分）
+  5.5 AI 核对重说线索，并逐句扫剩余词级口癖（B2/B3/B4，脚本覆盖不到的部分）
   5.6 merge_selections.js
   6-7. 生成审核网页 + 启动服务器
   7A. 完整模型 A/B（用户显式确认时：两个 ASR 均跑 5.1–7，再盲审比较）
@@ -147,13 +147,15 @@ bash "$SKILL_DIR/scripts/run_transcribe.sh" "$VIDEO_PATH" "$BASE_DIR"
 node "$SKILL_DIR/scripts/gen_analysis.js" \
   "$BASE_DIR/1_转录/subtitles_words.json" \
   "$BASE_DIR/2_分析"
-# 输出: analysis.txt + sentence_map.json + auto_selected.json
+# 输出: analysis.txt + sentence_map.json + restart_candidates.json + auto_selected.json
 ```
 
 #### 5.2 读取规则 + 分析文件
 
-读 `用户习惯/规则.md`、`用户习惯/经验规则.md`（自进化沉淀的个人偏好，见步骤 8）和 `analysis.txt`。
+读 `用户习惯/规则.md`、`用户习惯/经验规则.md`（自进化沉淀的个人偏好，见步骤 8）、`analysis.txt` 和 `restart_candidates.json`。
 两份规则都要遵守；冲突时以更具体、更新的为准。
+
+`restart_candidates.json` 是脚本根据“前短后长”的重复锚点产生的**待审核线索**，可能来自同一句，也可能来自相邻 1–3 句。它不是删除任务：每条都必须回听并做语义确认；`suggestedDelete` 只是初始锚点，必要时结合 `sourceSentenceRange` 缩放到草稿的真实起止。只有前段确实是草稿/残句、后段更完整时，才把确认后的 idx 写进 `speech_errors.json`；普通重复、列举、固定说法或不确定的情况不打删除标。
 
 `analysis.txt` 格式（每行一句，序号: 文本）：
 ```
@@ -167,7 +169,7 @@ node "$SKILL_DIR/scripts/gen_analysis.js" \
 > ⚠️ 由你直接阅读 `analysis.txt` 并判断哪些**整句**是口误。
 > **本步只填 `delete_sentences`**，`delete_idx` 留空数组。词级口癖留到 5.4（脚本）+ 5.5（AI 补漏）。
 
-按 `规则.md` 的 **A 节（整句删除）** 判断：重复重说、残句、句内卡顿、只含语气词的整句等。
+按 `规则.md` 的 **A 节（整句删除）** 判断：重复重说、残句、句内卡顿、只含语气词的整句等。对 `restart_candidates.json` 里的线索，若草稿只占原句的一部分，不要因方便而整句删；先在 5.5 取到精确词级 idx，再以预选删除标送入审核页。
 
 **输出格式**（写入 `$BASE_DIR/2_分析/speech_errors.json`）：
 ```json
@@ -190,24 +192,24 @@ node "$SKILL_DIR/scripts/auto_filler.js" \
 
 - 任意位置：`呃 / 嗯 / 额 / 诶 / 欸 / 唉 / 噢`（已排除"额外/金额"等真词）
 - 任意位置的：`然后`（用户偏好：宁可手动加回）
-- 句首过渡词：`然后 / 那么 / 好的 / 哦 / 哎 / 呀 / 对 / 呢 / 那`（"那"会避开"那个/那么/那里"等）
-- 句尾废词：`对 / 呢 / 哦`
-- 自然语气词「啊」默认由经验规则保护；仅在语义分析确认它独立成句、连续堆叠或明显卡顿时才标记删除。
+- 句首过渡词：`然后 / 那么 / 好的 / 哦 / 哎 / 呀 / 对 / 那`（"那"会避开"那个/那么/那里"等）
+- 句尾废词：`对 / 哦`
+- 自然语气词「啊」「呢」默认由经验规则保护；仅在语义分析确认它独立成句、连续堆叠、明显卡顿或明显无功能时才标记删除。不得仅因「呢」处于句首/句尾而删除。
 - 跳过已整句删除的句子；保护剩余字数 ≤3-4 的短句不被掏空
 
 跑完后，用户已手工填的 idx 也会被保留（合并去重）。
 
 #### 5.5 AI 逐句扫剩余词级口癖（脚本覆盖不到的部分）
 
-脚本只处理"无需上下文判断"的安全口癖。AI 在此扫 `analysis.txt`，找出脚本覆盖不到的：
+脚本只处理"无需上下文判断"的安全口癖。AI 在此结合 `analysis.txt` 与 `restart_candidates.json`，找出脚本覆盖不到的：
 
-- **B4 句中重说**（优先级最高）：前半段说错、后半段纠正 → 删前半段，保留后半段
+- **B4 同句 / 邻句重说**（优先级最高）：前半段说错、说到一半或较短草稿，后半段 / 后句以同主题更完整地重说 → 在确认后删前半段，保留后半段。`restart_candidates.json` 只提供重复锚点和建议范围，不能跳过语义确认直接删除。
 - **B3 冗余引导短语**：大家可以看到、你看、给大家看一下、比如说你看一下、我可以告诉你、你明白吗
 - **B2 句中填充词**（**慎用**，需明确判断为口癖才删）：其实、就、也、大概、这个、那个、就是
 - **B5 脚本未覆盖的句尾拖音**
 
 **工作方式（避免 token 爆炸 + 过删）：**
-1. 顺序扫 `analysis.txt`，只标"明显有问题"的句子。没明显问题的句子直接跳过，不要为了"也许能再删一点"硬挑刺。
+1. 先核对 `restart_candidates.json`：只有“前短后长、后者可独立表达”的重说才转成删除标；随后顺序扫 `analysis.txt`，只标"明显有问题"的句子。没明显问题的句子直接跳过，不要为了"也许能再删一点"硬挑刺。
 2. 把候选句号攒成一批（建议 20-30 句一组），**一次** `gen_word_detail.js` 调用拿到词级 idx。
 3. 把新增 idx **合并**写回 `speech_errors.json` 的 `delete_idx`（与 5.4 结果取并集，不要覆盖）。
 
@@ -268,9 +270,9 @@ bash "$SKILL_DIR/scripts/serve_review.sh" \
      "$VIDEO_PATH" "$AB_DIR"
    ```
 
-   输出的 `manifest.json` 会冻结视频/音频哈希、Git 版本、`规则.md`、`经验规则.md` 和 `SKILL.md` 快照。脚本只生成两组 `analysis.txt`，**不会**把空的 `auto_selected.json` 直接送入审核页。
+   输出的 `manifest.json` 会冻结视频/音频哈希、Git 版本、`规则.md`、`经验规则.md`、`SKILL.md` 和运行脚本快照。脚本会为两组生成 `analysis.txt` 与 `restart_candidates.json`，但**不会**把空的 `auto_selected.json` 直接送入审核页。
 
-3. **同一口误分析层必须跑两次**：对 `A/2_分析/analysis.txt` 和 `B/2_分析/analysis.txt` 分别读取 `$AB_DIR/contract/` 中冻结的规则，按步骤 5.3–5.5 各自写 `speech_errors.json`。不得复制另一组的 idx，因为 ASR 的分词和句界不同。
+3. **同一口误分析层必须跑两次**：对 `A/2_分析/analysis.txt`、`A/2_分析/restart_candidates.json` 和 B 的对应文件，分别读取 `$AB_DIR/contract/` 中冻结的规则，按步骤 5.3–5.5 各自写 `speech_errors.json`。重说线索必须逐条做语义确认，确认后才变为预选删除标；不得复制另一组的 idx，因为 ASR 的分词和句界不同。
 
    分析完成后，为每组显式落完成标记：
 

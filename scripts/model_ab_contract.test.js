@@ -31,6 +31,7 @@ try {
     'scripts/volcengine_seedasr2_transcribe.sh',
     'scripts/generate_subtitles.js',
     'scripts/gen_analysis.js',
+    'scripts/lib/detect_restarts.js',
     'scripts/auto_filler.js',
     'scripts/merge_selections.js',
     'scripts/generate_review.js',
@@ -83,8 +84,14 @@ try {
     fs.writeFileSync(path.join(analysisDir, 'analysis.txt'), '0: 甲乙\n');
     writeJson(path.join(analysisDir, 'sentence_map.json'), [{ startIdx: 0, endIdx: 2 }]);
     writeJson(path.join(analysisDir, 'auto_selected.json'), [1]);
+    writeJson(path.join(analysisDir, 'restart_candidates.json'), {
+      schemaVersion: 1,
+      candidates: [],
+    });
     writeJson(path.join(analysisDir, 'speech_errors.json'), { delete_sentences: [], delete_idx: [0] });
     run('create_model_ab_manifest.js', ['analysis-context', abDir, variant]);
+    const analysisContext = JSON.parse(fs.readFileSync(path.join(analysisDir, 'analysis_context.json'), 'utf8'));
+    assert.strictEqual(analysisContext.restartCandidates.enforcement, 'semantic-review-only');
     run('mark_model_ab_analysis_complete.js', [analysisDir, 'test-agent']);
     run('mark_model_ab_analysis_complete.js', ['--check', analysisDir]);
 

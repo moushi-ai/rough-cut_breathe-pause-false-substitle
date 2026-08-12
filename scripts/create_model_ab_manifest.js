@@ -82,6 +82,7 @@ const RUNTIME_FILES = [
   'scripts/volcengine_seedasr2_transcribe.sh',
   'scripts/generate_subtitles.js',
   'scripts/gen_analysis.js',
+  'scripts/lib/detect_restarts.js',
   'scripts/auto_filler.js',
   'scripts/merge_selections.js',
   'scripts/generate_review.js',
@@ -207,8 +208,12 @@ function writeAnalysisContext(abDirInput, variantInput) {
   const variant = requireVariant(variantInput);
   const manifest = loadManifest(abDir);
   const analysisDir = path.join(abDir, variant, '2_分析');
-  for (const file of ['analysis.txt', 'sentence_map.json', 'auto_selected.json']) {
+  for (const file of ['analysis.txt', 'sentence_map.json', 'auto_selected.json', 'restart_candidates.json']) {
     if (!fs.existsSync(path.join(analysisDir, file))) die(`${variant} 缺少分析输入：${file}`);
+  }
+  const restartCandidates = readJson(path.join(analysisDir, 'restart_candidates.json'));
+  if (!restartCandidates || !Array.isArray(restartCandidates.candidates)) {
+    die(`${variant} 的 restart_candidates.json 格式不正确：必须包含 candidates 数组`);
   }
   writeJson(path.join(analysisDir, 'analysis_context.json'), {
     schemaVersion: 1,
@@ -217,7 +222,12 @@ function writeAnalysisContext(abDirInput, variantInput) {
     displayLabel: manifest.variants[variant].displayLabel,
     status: 'pending_semantic_analysis',
     generatedAt: new Date().toISOString(),
-    requiredNextStep: '由同一位 Agent 使用 contract/ 中冻结的 SKILL 与规则，审阅 analysis.txt 后写 speech_errors.json；完成后运行 mark_model_ab_analysis_complete.js。',
+    requiredNextStep: '由同一位 Agent 使用 contract/ 中冻结的 SKILL 与规则，结合 analysis.txt 与 restart_candidates.json 回听、审阅后写 speech_errors.json；restart_candidates 只提供证据，确认成立才写入删除标。完成后运行 mark_model_ab_analysis_complete.js。',
+    restartCandidates: {
+      file: 'restart_candidates.json',
+      count: restartCandidates.candidates.length,
+      enforcement: 'semantic-review-only',
+    },
     contract: manifest.contract,
   });
   console.log(`✅ ${variant} 已建立待办分析合同`);

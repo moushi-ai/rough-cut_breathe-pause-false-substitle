@@ -2,7 +2,7 @@
 #
 # 准备完整的“1.0 Flash vs 录音文件识别 2.0”半自动 A/B。
 #
-# 本脚本只自动完成：共享音频 → 双 ASR → 字幕规范化 → 分句/静音候选 → 冻结合同。
+# 本脚本只自动完成：共享音频 → 双 ASR → 字幕规范化 → 分句/静音候选/重说待审线索 → 冻结合同。
 # 它刻意停在语义口误分析之前，防止把空 auto_selected.json 当成完整审核结果。
 #
 # 用法:
@@ -103,8 +103,8 @@ echo "✅ A/B 转录与分析输入已完成: $AB_DIR"
 echo "   冻结的个人规则来源: $RULES_DIR"
 echo ""
 echo "下一步（必须完成，不能跳过）："
-echo "  1. 对 A 与 B 分别读取 2_分析/analysis.txt 和 contract/ 中冻结的规则。"
-echo "  2. 各自写 2_分析/speech_errors.json。"
+echo "  1. 对 A 与 B 分别读取 2_分析/analysis.txt、restart_candidates.json 和 contract/ 中冻结的规则。"
+echo "  2. 回听确认重说候选；只有确认成立的候选才写入各自的 2_分析/speech_errors.json。"
 echo "  3. 分别运行："
 echo "     node \"$SCRIPT_DIR/mark_model_ab_analysis_complete.js\" \"$AB_DIR/A/2_分析\" coding-agent"
 echo "     node \"$SCRIPT_DIR/mark_model_ab_analysis_complete.js\" \"$AB_DIR/B/2_分析\" coding-agent"

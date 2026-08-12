@@ -46,13 +46,15 @@ function validate() {
   if (!analysisDir || !fs.existsSync(analysisDir)) fail('请提供存在的 2_分析 目录');
   const mapFile = path.join(analysisDir, 'sentence_map.json');
   const errorsFile = path.join(analysisDir, 'speech_errors.json');
+  const restartCandidatesFile = path.join(analysisDir, 'restart_candidates.json');
   const wordsFile = path.join(path.dirname(analysisDir), '1_转录', 'subtitles_words.json');
-  for (const file of [mapFile, errorsFile, wordsFile]) {
+  for (const file of [mapFile, errorsFile, restartCandidatesFile, wordsFile]) {
     if (!fs.existsSync(file)) fail(`缺少必需文件：${file}`);
   }
 
   const sentenceMap = readJson(mapFile);
   const errors = readJson(errorsFile);
+  const restartCandidates = readJson(restartCandidatesFile);
   const words = readJson(wordsFile);
   if (!Array.isArray(sentenceMap) || !Array.isArray(words)) fail('sentence_map.json 或 subtitles_words.json 格式不正确');
   if (!errors || Array.isArray(errors) || typeof errors !== 'object') fail('speech_errors.json 必须是对象格式');
@@ -74,7 +76,23 @@ function validate() {
     if (duplicateWord.has(idx)) fail(`delete_idx 有重复索引：${idx}`);
     duplicateWord.add(idx);
   }
-  return { errorsFile, sentenceMap, words, deleteSentences, deleteIdx };
+  if (!restartCandidates || !Array.isArray(restartCandidates.candidates)) {
+    fail('restart_candidates.json 必须包含 candidates 数组');
+  }
+  for (const candidate of restartCandidates.candidates) {
+    if (!candidate || typeof candidate !== 'object') fail('restart_candidates.json 含有非对象候选');
+    if (!isInt(candidate.sourceSentence) || candidate.sourceSentence < 0 || candidate.sourceSentence >= sentenceMap.length) {
+      fail(`重说候选 sourceSentence 无效：${candidate.sourceSentence}`);
+    }
+    if (!isInt(candidate.restartSentence) || candidate.restartSentence < 0 || candidate.restartSentence >= sentenceMap.length) {
+      fail(`重说候选 restartSentence 无效：${candidate.restartSentence}`);
+    }
+    const range = candidate.suggestedDelete;
+    if (!range || !isInt(range.startIdx) || !isInt(range.endIdx) || range.startIdx < 0 || range.endIdx < range.startIdx || range.endIdx >= words.length) {
+      fail('重说候选 suggestedDelete 范围无效');
+    }
+  }
+  return { errorsFile, restartCandidatesFile, sentenceMap, words, deleteSentences, deleteIdx, restartCandidates };
 }
 
 if (checkOnly) {
@@ -96,6 +114,8 @@ const marker = {
   completedAt: new Date().toISOString(),
   analyst,
   semanticErrorsSha256: sha256(result.errorsFile),
+  restartCandidatesSha256: sha256(result.restartCandidatesFile),
+  restartCandidateCount: result.restartCandidates.candidates.length,
   deleteSentences: result.deleteSentences.length,
   deleteIdxBeforeAutoFiller: result.deleteIdx.length,
   sentenceCount: result.sentenceMap.length,

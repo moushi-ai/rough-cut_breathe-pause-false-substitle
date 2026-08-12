@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { detectRestartCandidates } = require('./lib/detect_restarts');
 
 const inputFile = process.argv[2];
 const outDir = process.argv[3];
@@ -49,4 +50,15 @@ fs.writeFileSync(path.join(outDir, 'analysis.txt'), analysisLines);
 const sentenceMap = sentences.map(s => ({ startIdx: s.startIdx, endIdx: s.endIdx }));
 fs.writeFileSync(path.join(outDir, 'sentence_map.json'), JSON.stringify(sentenceMap, null, 2));
 
-console.log('analysis: ' + sentences.length + ' 句, ' + silenceIdx.length + ' 静音');
+// “前短后长”的同句 / 邻句重说只产生待审核线索，不会直接写入删除列表。
+// 语义分析层必须回听并确认后，才能把候选转为 speech_errors.json 的 delete_idx。
+const restartCandidates = detectRestartCandidates({ words: data, sentenceMap });
+fs.writeFileSync(
+  path.join(outDir, 'restart_candidates.json'),
+  JSON.stringify(restartCandidates, null, 2),
+);
+
+console.log(
+  'analysis: ' + sentences.length + ' 句, ' + silenceIdx.length + ' 静音, ' +
+  restartCandidates.candidates.length + ' 个重说待审候选',
+);

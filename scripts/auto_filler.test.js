@@ -14,11 +14,11 @@ const errorsFile = path.join(root, 'speech_errors.json');
 
 try {
   fs.writeFileSync(mapFile, JSON.stringify([
-    { startIdx: 0, endIdx: 7 },
-    { startIdx: 8, endIdx: 8 },
+    { startIdx: 0, endIdx: 8 },
+    { startIdx: 9, endIdx: 9 },
   ]));
   fs.writeFileSync(wordsFile, JSON.stringify([
-    { text: '啊' }, { text: '这' }, { text: '是' }, { text: '一' }, { text: '个' }, { text: '完' }, { text: '整' }, { text: '啊' },
+    { text: '啊' }, { text: '这' }, { text: '是' }, { text: '一' }, { text: '个' }, { text: '完' }, { text: '整' }, { text: '呢' }, { text: '啊' },
     { text: '嗯' },
   ]));
   fs.writeFileSync(errorsFile, JSON.stringify({ delete_sentences: [], delete_idx: [] }));
@@ -26,9 +26,10 @@ try {
   execFileSync(process.execPath, [script, mapFile, wordsFile, errorsFile], { encoding: 'utf8' });
   const result = JSON.parse(fs.readFileSync(errorsFile, 'utf8'));
   assert(!result.delete_idx.includes(0), '自然句首“啊”必须默认保留');
-  assert(!result.delete_idx.includes(7), '自然句尾“啊”必须默认保留');
-  assert(result.delete_idx.includes(8), '独立“嗯”仍应进入自动候选');
-  console.log('auto filler natural-a protection test passed');
+  assert(!result.delete_idx.includes(7), '功能性句尾“呢”必须默认保留');
+  assert(!result.delete_idx.includes(8), '自然句尾“啊”必须默认保留');
+  assert(result.delete_idx.includes(9), '独立“嗯”仍应进入自动候选');
+  console.log('auto filler natural-a-ne protection test passed');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
