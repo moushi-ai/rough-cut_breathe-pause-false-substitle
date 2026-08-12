@@ -1,13 +1,11 @@
 # AI剪口播（团队版）
 
 粗剪气口与口误，生成字幕文档。团队维护仓库：[`moushi-ai/rough-cut_breathe-pause-false-substitle`](https://github.com/moushi-ai/rough-cut_breathe-pause-false-substitle)。
-
-本项目基于 **栗氪聊AI** 创建的 AI剪口播；保留其 AGPL-3.0 许可证与原始署名，并在团队版中持续维护功能改进。
+ AI剪口播；保留其 AGPL-3.0 许可证与原始署名，并在团队版中持续维护功能改进。
 
 一个**剪口播视频的 coding-agent skill**:自动转录 → AI 识别口误/口癖/静音 → 网页波形审核 → 导出 FCPXML,拖进剪映或 Final Cut Pro 完成最后一刀。核心是一份 [`SKILL.md`](SKILL.md),**任何支持 skill、能读文件、能跑 shell 的 coding agent 都能装来用**,不绑定特定工具。
 > 这个项目灵感最初来源于GitHub开源项目 videocut-skills，为了适配我自己的剪辑工作流，重写和扩展了工程导出、前端交互、视频预览、核心剪辑逻辑、语音识别和音频识别字幕等功能
 
-![审核页界面](assets/review-ui.png)
 
 > 审核网页:左侧逐字稿点划即删,右侧调静音留白,底部三色波形(灰=静音、红=选中删除、黄=算法额外切掉)。改到满意点「导出 FCPXML」。
 
