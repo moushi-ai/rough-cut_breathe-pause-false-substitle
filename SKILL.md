@@ -400,12 +400,12 @@ node "$SKILL_DIR/scripts/extract_text.js" \
 4. 输出到与输入同一流程的纠错目录：直接模式为 `$BASE_DIR/2_纠错/corrected.txt`；审核后成片字幕为 `$BASE_DIR/4_字幕/corrected.txt`（每行一句，与输入 1:1 对应）
 5. 如有「不确定清单」，输出到同目录 `uncertain.md` 并在对话中列出给用户。人名、专有名词不确定时保留原 ASR，不得猜测后全篇替换。
 
-#### B-2.5 审核后成片字幕的事实核验（自动发现和搜索，人工确认）
+#### B-2.5 审核后成片字幕的事实核验（自动发现、联网/声学核验，人工确认）
 
 > 只用于已走完「步骤 7B」的成片字幕：它需要 `retained_transcript.json` 保留的逐字时间轴，当前不对直接转字幕模式伪造时间映射。
 
-1. 输入是完整的 `$BASE_DIR/4_字幕/corrected.txt`。模型先读全文生成**主题关键词 + 事实候选地图**，发现高风险的：人名、机构/公司、产品、地点、奖项、日期、数字、术语；有限核验名额必须优先给疑似 ASR 同音/形近错写和与事件名单不一致的实体，已正确事实后置。
-2. **绝不把全文直接作为搜索词，也不只拿主题搜索。** 每个候选的联网查询包必须是「候选原文变体 + 主题关键词 + 本地出现上下文」。
+1. 输入是完整的 `$BASE_DIR/4_字幕/corrected.txt`。模型先读全文生成**短事实 brief（关键词串）+ 主题关键词 + 事实候选地图**，发现高风险的：人名、机构/公司、产品、地点、奖项、日期、数字、术语；有限核验名额必须优先给疑似 ASR 同音/形近错写和与事件名单不一致的实体，已正确事实后置。
+2. **绝不把全文直接作为搜索词，也不只拿主题搜索。** 每个候选的联网查询包必须是「候选原文变体 + 文案 brief + 主题关键词 + 本地出现上下文」。
 3. 模型使用 **Doubao Seed 2.0 Lite**（配置名 `doubao-seed-2.0-lite` 会自动解析为当前 Responses API 端点 `doubao-seed-2-0-lite-260215`）和方舟内置 Web Search。模型不输出“建议”或 JSON，只填写固定标签文本；脚本严格翻译为 JSON 工件并收集 Web Search 来源。`ANSWER` 和 `CONFIDENCE` 是下游机器字段，`REASON` 只给人工审阅，不能驱动自动应用：
 
    ```text
@@ -420,15 +420,18 @@ node "$SKILL_DIR/scripts/extract_text.js" \
 4. 脚本只写入 `4_字幕/事实核验/`，**绝不修改** `corrected.txt` 或 `subtitles_formatted.md`。先把 `fact_check_candidates.md` 给用户审阅并等待明确的候选 ID 决定。
 
 ```bash
-# 先验证本机未提交的 ARK_API_KEY、模型和 Web Search 权限；不会显示 Key
+# 先验证本机未提交的 ARK_API_KEY、模型、Web Search、火山引擎 Key 和声学复核依赖；不会显示 Key
 node "$SKILL_DIR/scripts/check_fact_check_config.js" \
-  --model "${FACT_CHECK_MODEL:-doubao-seed-2.0-lite}" --web-search
+  --model "${FACT_CHECK_MODEL:-doubao-seed-2.0-lite}" --web-search --audio-recheck
 
 # 自动生成事实地图、联网证据与人工审批模板；不会应用任何修改
 node "$SKILL_DIR/scripts/fact_check_subtitles.js" \
   "$BASE_DIR/4_字幕" \
   --model "${FACT_CHECK_MODEL:-doubao-seed-2.0-lite}"
 ```
+
+5. **裸数字声学复核（自动，绝不猜单位）**：对 `72` 这类仅含阿拉伯数字、可能缺 `%` 的 NUMBER 候选，先用其原始逐词时间轴从 `1_转录/audio.mp3` 连续截取“候选前 2 秒 + 候选后 2 秒”（不删静音、不拼接），再固定调用 1.0 极速版 `--verbatim`：`enable_itn=false`、`enable_punc=false`、`show_utterances=true`。随后把首遍 ASR 文本、二遍原样文本、候选时间和切片规则一起交给 Doubao Seed 2.0 Lite；模型只能在 `原文裸数字` / `同值%` / `uncertain` 中用 `[AUDIO_DECISION]` 固定文本作答，不能联网猜单位或输出 JSON。
+6. 声学复核失败、时间轴缺失、二遍文本没有明确说出“百分之”、或模型越出允许选项时，必须是 `uncertain`；不得退回纯文本/联网猜测。声学结论和首末时间、两遍文本、切片规则会进入 `fact_check_evidence.json` 与候选报告，**仍需人工批准**才可应用。
 
 生成后必须展示 `$BASE_DIR/4_字幕/事实核验/fact_check_candidates.md` 中的证据，并等待用户明确确认。例如：
 

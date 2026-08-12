@@ -14,7 +14,8 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const SCHEMA_VERSION = 1;
+// v2：NUMBER 裸数字候选可携带首遍/二遍 ASR 与固定切片规则的声学复核证据。
+const SCHEMA_VERSION = 2;
 const ENTITY_TYPES = new Set(['PERSON', 'ORGANIZATION', 'COMPANY', 'PRODUCT', 'PLACE', 'AWARD', 'DATE', 'NUMBER', 'TERM', 'OTHER']);
 
 function fail(message) {

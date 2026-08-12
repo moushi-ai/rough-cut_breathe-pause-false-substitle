@@ -1,10 +1,11 @@
 'use strict';
 
 const assert = require('assert');
-const { parseFactMapText, parseVerificationText } = require('./lib/fact_check_text_protocol');
+const { parseAudioDecisionText, parseFactMapText, parseVerificationText } = require('./lib/fact_check_text_protocol');
 
 const map = parseFactMapText(`
 [FACT_MAP]
+BRIEF: 菲尔兹奖人物介绍 | 数学家获奖事件
 TOPICS: 菲尔兹奖 | 数学家
 [CANDIDATE]
 TYPE: PERSON
@@ -20,6 +21,7 @@ AFTER: 北大同届的校友
 [/FACT_MAP]
 `);
 assert.deepStrictEqual(map.topicKeywords, ['菲尔兹奖', '数学家']);
+assert.strictEqual(map.documentBrief, '菲尔兹奖人物介绍 | 数学家获奖事件');
 assert.strictEqual(map.candidates[0].name, '邓玉');
 assert.strictEqual(map.candidates[0].occurrences[0].line, 2);
 assert.strictEqual(map.candidates[0].occurrences[0].mention, '邓玉');
@@ -45,10 +47,32 @@ REASON: 证据冲突
 `);
 assert.strictEqual(uncertain.status, 'unresolved');
 
+const audioDecision = parseAudioDecisionText(`
+[AUDIO_DECISION]
+ANSWER: 72 -> 72%
+CONFIDENCE: 0.98
+REASON: 二遍原样复听文本明确为百分之七十二
+[/AUDIO_DECISION]
+`);
+assert.strictEqual(audioDecision.status, 'proposed');
+assert.strictEqual(audioDecision.answerFrom, '72');
+assert.strictEqual(audioDecision.replacement, '72%');
+
+assert.throws(
+  () => parseAudioDecisionText('[AUDIO_DECISION]\nANSWER: 72 -> 72%\nCONFIDENCE: 0.98\n[/AUDIO_DECISION]'),
+  /缺少字段：REASON/,
+  '声学裁决协议缺字段必须被拒绝'
+);
+
 assert.throws(
   () => parseFactMapText('[FACT_MAP]\nTOPICS: x\n'),
   /缺少 \[\/FACT_MAP\]/,
   '不完整协议必须被拒绝'
+);
+assert.throws(
+  () => parseFactMapText('[FACT_MAP]\nTOPICS: x\n[/FACT_MAP]'),
+  /缺少非空 BRIEF/,
+  '全文事实核验必须先产出 brief，不能退化为只带主题搜索'
 );
 assert.throws(
   () => parseVerificationText('{"status":"proposed"}'),

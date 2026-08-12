@@ -44,9 +44,10 @@ function parseFactMapText(text) {
   const map = { documentBrief: '', topicKeywords: [], timeScope: '', candidates: [] };
   let candidate = null;
   let occurrence = null;
-  const mapFields = new Set(['TOPICS']);
+  const mapFields = new Set(['BRIEF', 'TOPICS']);
   const candidateFields = new Set(['TYPE', 'VARIANT', 'RISK']);
   const occurrenceFields = new Set(['LINE', 'MENTION', 'BEFORE', 'AFTER']);
+  const seenMapFields = new Set();
 
   for (const line of lines.slice(lines.indexOf('[FACT_MAP]') + 1)) {
     if (!line) continue;
@@ -57,11 +58,15 @@ function parseFactMapText(text) {
         continue;
       }
       if (line === '[/FACT_MAP]') {
+        if (!seenMapFields.has('BRIEF') || !map.documentBrief) fail('FACT_MAP 缺少非空 BRIEF');
         ended = true;
         state = 'done';
         continue;
       }
       const { key, value } = parseField(line, mapFields, 'FACT_MAP');
+      if (seenMapFields.has(key)) fail(`FACT_MAP 中重复字段：${key}`);
+      seenMapFields.add(key);
+      if (key === 'BRIEF') map.documentBrief = value;
       if (key === 'TOPICS') map.topicKeywords = splitList(value);
       continue;
     }
@@ -144,7 +149,50 @@ function parseVerificationText(text) {
   };
 }
 
+/*
+ * 声学复核的最终裁决协议。
+ *
+ * 它与联网事实核验一样只接受受限文本，而不是 JSON；区别在于 ANSWER 的证据
+ * 来自“首遍 ASR + 关闭 ITN 的二遍 ASR + 固定音频切片规则”，而非 Web Search。
+ */
+function parseAudioDecisionText(text) {
+  const lines = protocolLines(text);
+  if (firstNonEmpty(lines) !== '[AUDIO_DECISION]') fail('首个非空行必须是 [AUDIO_DECISION]');
+  const begin = lines.indexOf('[AUDIO_DECISION]');
+  const end = lines.indexOf('[/AUDIO_DECISION]');
+  if (end === -1 || end <= begin) fail('缺少 [/AUDIO_DECISION]');
+  if (lines.slice(end + 1).some(line => line)) fail('[/AUDIO_DECISION] 后不应再出现内容');
+  const fields = {};
+  const allowed = new Set(['ANSWER', 'CONFIDENCE', 'REASON']);
+  for (const line of lines.slice(begin + 1, end)) {
+    if (!line) continue;
+    const { key, value } = parseField(line, allowed, 'AUDIO_DECISION');
+    if (Object.prototype.hasOwnProperty.call(fields, key)) fail(`AUDIO_DECISION 中重复字段：${key}`);
+    fields[key] = value;
+  }
+  for (const key of allowed) {
+    if (!Object.prototype.hasOwnProperty.call(fields, key)) fail(`AUDIO_DECISION 缺少字段：${key}`);
+  }
+  const confidence = Number(fields.CONFIDENCE);
+  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+    fail('AUDIO_DECISION 的 CONFIDENCE 必须是 0 到 1 的数字');
+  }
+  if (fields.ANSWER.toLowerCase() === 'uncertain') {
+    return { status: 'unresolved', answerFrom: '', replacement: '', confidence, reason: fields.REASON };
+  }
+  const match = fields.ANSWER.match(/^(.+?)\s*(?:->|→)\s*(.+?)$/);
+  if (!match) fail('AUDIO_DECISION 的 ANSWER 只能是“原文 -> 标准写法”或 uncertain');
+  return {
+    status: 'proposed',
+    answerFrom: match[1].trim(),
+    replacement: match[2].trim(),
+    confidence,
+    reason: fields.REASON,
+  };
+}
+
 module.exports = {
+  parseAudioDecisionText,
   parseFactMapText,
   parseVerificationText,
 };

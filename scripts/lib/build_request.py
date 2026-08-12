@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # 构建火山引擎新版控制台（极速版 / 标准版）转录请求体，打印 JSON 到 stdout。
 #
-# 用法: python3 build_request.py <audio_file_or_url>
+# 用法: python3 build_request.py <audio_file_or_url> [--enable-itn true|false]
 #   · 以 http(s):// 开头 → URL 模式（audio.url）
 #   · 否则当本地文件 → base64 直传（audio.data）
 #   · format 由扩展名推断，默认 mp3
@@ -10,12 +10,23 @@
 # 所以这里只有一份，避免两个脚本各抄一遍（历史上抄了导致字数统计三种写法、路径插值脆弱）。
 
 import base64
+import argparse
 import json
 import os
 import re
 import sys
 
-audio = sys.argv[1]
+parser = argparse.ArgumentParser(description="构建火山引擎录音文件识别请求体")
+parser.add_argument("audio", help="本地音频路径或 http(s) URL")
+parser.add_argument(
+    "--enable-itn",
+    choices=("true", "false"),
+    default="true",
+    help="是否启用逆文本规范化；默认 true，声学复听必须显式传 false",
+)
+args = parser.parse_args()
+
+audio = args.audio
 
 if re.match(r'^https?://', audio):
     ext = os.path.splitext(audio.split('?')[0])[1].lstrip('.').lower() or 'mp3'
@@ -30,7 +41,7 @@ req = {
     "audio": audio_field,
     "request": {
         "model_name": "bigmodel",
-        "enable_itn": True,
+        "enable_itn": args.enable_itn == "true",
         "enable_punc": False,
         "enable_ddc": False,
         "show_utterances": True,

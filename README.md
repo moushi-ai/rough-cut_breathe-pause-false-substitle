@@ -89,7 +89,7 @@ export VOLCENGINE_API_KEY=粘贴你的key
    - **剪映专业版**:文件 → 导入 → Final Cut Pro XML
    - **Final Cut Pro**:双击 `.fcpxml` 即导入
 
-如果还要成片字幕，必须在审核页导出后，从 `3_审核/review_log.json` 提取最终保留台词，再做基础纠错、事实核验和断行；详细命令见 [`SKILL.md` 的“步骤 7B”](SKILL.md#步骤-7b从审核结果导出成片字幕)。事实核验会从全文生成主题和候选地图，再按「候选变体 + 主题 + 本地上下文」联网搜索，输出带证据的 `4_字幕/事实核验/fact_check_candidates.md`。模型以固定文本返回 `ANSWER: 原文 -> 标准写法`（或 `uncertain`）、`CONFIDENCE` 与仅供人工阅读的 `REASON`；不会输出“建议”。它不会自动替换：只有人工批准的直接答案才会写入独立的 `fact_checked.txt`，原 `corrected.txt` 永远保留。
+如果还要成片字幕，必须在审核页导出后，从 `3_审核/review_log.json` 提取最终保留台词，再做基础纠错、事实核验和断行；详细命令见 [`SKILL.md` 的“步骤 7B”](SKILL.md#步骤-7b从审核结果导出成片字幕)。事实核验先从全文生成短事实 brief、主题和候选地图，再按「候选变体 + brief + 主题 + 本地上下文」联网搜索，输出带证据的 `4_字幕/事实核验/fact_check_candidates.md`。模型以固定文本返回 `ANSWER: 原文 -> 标准写法`（或 `uncertain`）、`CONFIDENCE` 与仅供人工阅读的 `REASON`；不会输出“建议”。裸数字如 `72` 不允许由联网/大模型猜单位：系统会按原始词级时间截取候选前后各约 2 秒音频，以 `enable_itn=false` 做第二遍原样 ASR，再把两遍文本和切片规则交给豆包，只能在 `72`、`72%` 或 `uncertain` 中裁决。它不会自动替换：无论联网或声学证据，只有人工批准的直接答案才会写入独立的 `fact_checked.txt`，原 `corrected.txt` 永远保留。
 
 > 💡 剪完可以再说一句「**已导出,学一下**」。agent 会对比「AI 预选」和「你实际怎么剪」,提出可泛化的规则；经人工确认后沉淀到团队经验库，供所有同事的下一次预标使用。
 

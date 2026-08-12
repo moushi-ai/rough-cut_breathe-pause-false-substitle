@@ -11,9 +11,14 @@ volc_gen_request_id() {
   printf '%s' "$id" | tr '[:upper:]' '[:lower:]'
 }
 
-# volc_build_request <audio_file_or_url> <out_file>：写请求体 JSON 到 out_file
+# volc_build_request <audio_file_or_url> <out_file> [build_request.py 参数]：写请求体 JSON 到 out_file
+# 常规完整转录不传额外参数，保持 enable_itn=true；声学复听显式传
+# --enable-itn false，避免数字/单位被 ASR 格式化成符号。
 volc_build_request() {
-  python3 "$SCRIPT_DIR/lib/build_request.py" "$1" > "$2"
+  local audio_input="$1"
+  local output_file="$2"
+  shift 2
+  python3 "$SCRIPT_DIR/lib/build_request.py" "$audio_input" "$@" > "$output_file"
 }
 
 # volc_header <headers_file> <header-name>：取响应头的值（大小写不敏感，取首个空格后全部）

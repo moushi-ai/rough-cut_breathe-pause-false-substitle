@@ -3,8 +3,12 @@
 # 火山引擎 大模型录音文件极速版（auc_turbo / flash 接口）
 #
 # 用法:
-#   ./volcengine_flash_transcribe.sh <local_file>  [output_dir]   ← 推荐，base64 直传
-#   ./volcengine_flash_transcribe.sh <https://...>  [output_dir]   ← URL 模式
+#   ./volcengine_flash_transcribe.sh <local_file>  [output_dir] [--verbatim]   ← 推荐，base64 直传
+#   ./volcengine_flash_transcribe.sh <https://...>  [output_dir] [--verbatim]  ← URL 模式
+#
+# --verbatim 只供事实核验的短片声学复听：显式关闭 ITN，使“百分之七十二”
+# 这类口头表达保留为文本，不被服务端转换为 72%。完整视频首次转录不传该参数，
+# 保持现有 enable_itn=true 行为。
 #
 # 输出: <output_dir>/volcengine_v3_result.json （与标准版同名，下游脚本无需区分引擎）
 #
@@ -19,8 +23,32 @@
 
 set -e
 
-AUDIO_INPUT="$1"
-OUT_DIR="${2:-.}"
+AUDIO_INPUT=""
+OUT_DIR="."
+VERBATIM=0
+POSITIONAL=0
+for arg in "$@"; do
+  case "$arg" in
+    --verbatim) VERBATIM=1 ;;
+    --*)
+      echo "❌ 未知参数: $arg"
+      echo "用法: $0 <local_file_or_url> [output_dir] [--verbatim]"
+      exit 1
+      ;;
+    *)
+      if [ "$POSITIONAL" -eq 0 ]; then
+        AUDIO_INPUT="$arg"
+      elif [ "$POSITIONAL" -eq 1 ]; then
+        OUT_DIR="$arg"
+      else
+        echo "❌ 参数过多"
+        echo "用法: $0 <local_file_or_url> [output_dir] [--verbatim]"
+        exit 1
+      fi
+      POSITIONAL=$((POSITIONAL + 1))
+      ;;
+  esac
+done
 
 if [ -z "$AUDIO_INPUT" ]; then
   echo "❌ 用法: $0 <local_file_or_url> [output_dir]"
@@ -51,7 +79,12 @@ trap 'rm -f "$REQ" "$HDR"' EXIT
 
 echo "🎤 火山引擎 极速版 转录..."
 echo "   输入: $AUDIO_INPUT"
-volc_build_request "$AUDIO_INPUT" "$REQ"
+REQUEST_ARGS=()
+if [ "$VERBATIM" -eq 1 ]; then
+  REQUEST_ARGS=(--enable-itn false)
+  echo "   模式: 原样复听（enable_itn=false，保留口头数字表达）"
+fi
+volc_build_request "$AUDIO_INPUT" "$REQ" "${REQUEST_ARGS[@]}"
 
 HTTP_CODE=$(curl -s -o "$OUT_DIR/volcengine_v3_result.json" -D "$HDR" -w "%{http_code}" \
   -X POST "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash" \

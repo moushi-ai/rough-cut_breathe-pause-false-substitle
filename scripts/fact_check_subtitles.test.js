@@ -20,7 +20,7 @@ async function main() {
     const mockFile = path.join(root, 'mock.json');
     fs.writeFileSync(mockFile, JSON.stringify({
       model: 'mock-doubao',
-      factMapText: '[FACT_MAP]\nTOPICS: 数学 | 获奖\n[CANDIDATE]\nTYPE: PERSON\nVARIANT: 邓玉\nRISK: high\n[OCCURRENCE]\nLINE: 1\nMENTION: 邓玉\nBEFORE: \nAFTER: 和王虹\n[/OCCURRENCE]\n[/CANDIDATE]\n[/FACT_MAP]',
+      factMapText: '[FACT_MAP]\nBRIEF: 数学 | 获奖人物\nTOPICS: 数学 | 获奖\n[CANDIDATE]\nTYPE: PERSON\nVARIANT: 邓玉\nRISK: high\n[OCCURRENCE]\nLINE: 1\nMENTION: 邓玉\nBEFORE: \nAFTER: 和王虹\n[/OCCURRENCE]\n[/CANDIDATE]\n[/FACT_MAP]',
       verifications: {
         'FC-001': {
           webSearchUsed: true,
@@ -85,6 +85,85 @@ async function main() {
     const unsafe = await runFactCheck({ captionDir, mockFile: unsafeFile, maxCandidates: 20, model: '' });
     assert.strictEqual(unsafe.candidates[0].verification.status, 'unresolved', '句子级替换不得进入人工审批');
     assert.match(unsafe.candidates[0].verification.reason, /短实体\/日期\/术语/);
+
+    const numberCaptionDir = path.join(root, 'number-4_字幕');
+    fs.mkdirSync(numberCaptionDir, { recursive: true });
+    const numberLine = '石油对外依存度超过了72';
+    const numberWords = [...numberLine].map((text, sourceIndex) => ({
+      text, sourceIndex, start: sourceIndex * 0.1, end: (sourceIndex + 1) * 0.1,
+    }));
+    fs.writeFileSync(path.join(numberCaptionDir, 'corrected.txt'), `${numberLine}\n`);
+    fs.writeFileSync(path.join(numberCaptionDir, 'retained_transcript.json'), JSON.stringify({
+      lines: [{ text: numberLine, sourceStart: 0, sourceEnd: numberWords.length * 0.1, sourceWordIndices: numberWords.map(word => word.sourceIndex) }],
+      retainedWords: numberWords,
+    }, null, 2));
+    const numberMockFile = path.join(root, 'number-mock.json');
+    fs.writeFileSync(numberMockFile, JSON.stringify({
+      model: 'mock-doubao',
+      factMapText: '[FACT_MAP]\nBRIEF: 石油依存度 | 能源安全\nTOPICS: 能源 | 石油\n[CANDIDATE]\nTYPE: NUMBER\nVARIANT: 72\nRISK: high\n[OCCURRENCE]\nLINE: 1\nMENTION: 72\nBEFORE: 超过了\nAFTER: \n[/OCCURRENCE]\n[/CANDIDATE]\n[/FACT_MAP]',
+      audioRechecks: {
+        'FC-001': {
+          status: 'verified',
+          sourceAudio: 'audio.mp3',
+          window: {
+            candidateStart: 1.1, candidateEnd: 1.3, clipStart: 0, clipEnd: 3.3, durationSeconds: 3.3,
+            beforeSeconds: 1.1, afterSeconds: 2, policy: '连续原始音频窗口；候选前 2.00 秒、候选后 2.00 秒；不删静音、不拼接、不改速',
+          },
+          firstPass: { wordText: '石油对外依存度超过了72', utteranceText: '石油对外依存度超过了72', resultText: '' },
+          secondPass: {
+            engine: 'volc.bigasr.auc_turbo',
+            request: { enableItn: false, enablePunc: false, showUtterances: true, mode: 'verbatim_audio_recheck' },
+            wordText: '石油对外依存度超过了百分之七十二', utteranceText: '石油对外依存度超过了百分之七十二', resultText: '', resultSha256: 'mock',
+          },
+        },
+      },
+      audioDecisions: {
+        'FC-001': {
+          text: '[AUDIO_DECISION]\nANSWER: 72 -> 72%\nCONFIDENCE: 0.98\nREASON: 二遍原样复听文本为百分之七十二\n[/AUDIO_DECISION]',
+        },
+      },
+    }, null, 2));
+    const numberFactCheck = await runFactCheck({ captionDir: numberCaptionDir, mockFile: numberMockFile, maxCandidates: 20, model: '' });
+    assert.strictEqual(numberFactCheck.candidates[0].verification.status, 'proposed', '明确的声学复核可形成待人工确认候选');
+    assert.strictEqual(numberFactCheck.candidates[0].verification.replacement, '72%');
+    assert.strictEqual(numberFactCheck.candidates[0].verification.evidenceType, 'audio_recheck');
+    assert.match(fs.readFileSync(numberFactCheck.files.report, 'utf8'), /二遍 ASR 原样文本：石油对外依存度超过了百分之七十二/);
+    approveFactCorrections({ captionDir: numberCaptionDir, approve: ['FC-001'], reject: [], by: 'tester', note: '' });
+    const numberApplied = applyFactCorrections({ captionDir: numberCaptionDir });
+    assert.strictEqual(fs.readFileSync(numberApplied.outputFile, 'utf8'), '石油对外依存度超过了72%\n', '声学候选也必须只在人工批准后应用');
+
+    const malformedAudioDecisionFile = path.join(root, 'number-malformed-audio-decision.json');
+    const malformedMock = JSON.parse(fs.readFileSync(numberMockFile, 'utf8'));
+    malformedMock.audioDecisions['FC-001'] = { response: null };
+    fs.writeFileSync(malformedAudioDecisionFile, JSON.stringify(malformedMock, null, 2));
+    const malformedAudioDecision = await runFactCheck({
+      captionDir: numberCaptionDir,
+      mockFile: malformedAudioDecisionFile,
+      maxCandidates: 20,
+      model: '',
+    });
+    assert.strictEqual(
+      malformedAudioDecision.candidates[0].verification.status,
+      'unresolved',
+      '缺失或格式错误的声学裁决不得进入人工批准'
+    );
+
+    const multipleOccurrencesFile = path.join(root, 'number-multiple-occurrences.json');
+    const multipleOccurrencesMock = JSON.parse(fs.readFileSync(numberMockFile, 'utf8'));
+    multipleOccurrencesMock.factMapText = '[FACT_MAP]\nBRIEF: 石油依存度 | 能源安全\nTOPICS: 能源 | 石油\n[CANDIDATE]\nTYPE: NUMBER\nVARIANT: 72\nRISK: high\n[OCCURRENCE]\nLINE: 1\nMENTION: 72\nBEFORE: 超过了\nAFTER: \n[/OCCURRENCE]\n[OCCURRENCE]\nLINE: 1\nMENTION: 72\nBEFORE: 超过了\nAFTER: \n[/OCCURRENCE]\n[/CANDIDATE]\n[/FACT_MAP]';
+    fs.writeFileSync(multipleOccurrencesFile, JSON.stringify(multipleOccurrencesMock, null, 2));
+    const multipleOccurrences = await runFactCheck({
+      captionDir: numberCaptionDir,
+      mockFile: multipleOccurrencesFile,
+      maxCandidates: 20,
+      model: '',
+    });
+    assert.strictEqual(
+      multipleOccurrences.candidates[0].verification.status,
+      'unresolved',
+      '一个裸数字候选对应多个位置时不得交给模型猜单位'
+    );
+    assert.match(multipleOccurrences.candidates[0].verification.reason, /一个精确出现位置/);
     console.log('fact check subtitle flow test passed');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
