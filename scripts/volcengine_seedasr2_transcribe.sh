@@ -78,14 +78,19 @@ while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
   sleep 3
   ATTEMPT=$((ATTEMPT + 1))
 
-  curl -s -L -D "$Q_HDR" -o "$Q_BODY" \
+  # 查询期间的单次网络断连不应让已成功提交的异步任务直接丢失。
+  # curl 放在条件表达式中，避免 set -e 提前退出；下一轮继续用同一 request id 轮询。
+  if ! curl -s -L -D "$Q_HDR" -o "$Q_BODY" \
     -X POST "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query" \
     -H "X-Api-Key: $API_KEY" \
     -H "X-Api-Resource-Id: $RESOURCE_ID" \
     -H "X-Api-Request-Id: $REQUEST_ID" \
     "${QUERY_LOGID[@]}" \
     -H "Content-Type: application/json" \
-    -d "{}"
+    -d "{}"; then
+    echo -n "."
+    continue
+  fi
 
   STATUS=$(volc_status "$Q_HDR")
   case "$STATUS" in
