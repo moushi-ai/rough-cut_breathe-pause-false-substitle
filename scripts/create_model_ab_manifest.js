@@ -88,6 +88,13 @@ const RUNTIME_FILES = [
   'scripts/generate_review.js',
   'scripts/review_server.js',
   'scripts/extract_retained_transcript.js',
+  'scripts/fact_check_subtitles.js',
+  'scripts/approve_fact_corrections.js',
+  'scripts/apply_fact_corrections.js',
+  'scripts/check_fact_check_config.js',
+  'scripts/lib/ark_responses.js',
+  'scripts/lib/fact_check_contract.js',
+  'scripts/lib/fact_check_text_protocol.js',
   'scripts/lib/compute_keeps.js',
   'scripts/lib/fcpxml.js',
 ];

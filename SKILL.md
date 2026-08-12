@@ -23,7 +23,9 @@ output/YYYY-MM-DD_HH-MM_视频名/剪口播/
 │               <视频名>_cut.fcpxml   ← 网页点击「导出 FCPXML」后生成在此目录
 │                                      拖入剪映 / Final Cut Pro 完成最终剪辑
 └── 4_字幕/   retained_raw.txt · retained_transcript.json · corrected.txt · uncertain.md
-                subtitles_formatted.md ← 仅含审核后成片保留的台词
+                事实核验/{fact_map.json · fact_check_candidates.md · fact_check_evidence.json
+                          · approval_template.json · approved_corrections.json · fact_corrections_applied.json}
+                fact_checked.txt（仅含人工批准的事实修改）· subtitles_formatted.md
 ```
 
 **模式 B（转字幕）：**
@@ -53,12 +55,13 @@ output/YYYY-MM-DD_HH-MM_视频名/剪口播/
   7A. 完整模型 A/B（用户显式确认时：两个 ASR 均跑 5.1–7，再盲审比较）
   【等待用户确认】→ 网页点击「导出 FCPXML」→ 拖入剪映 / Final Cut Pro 完成剪辑
        （导出同时写 3_审核/review_log.json，供步骤 8 学习）
-  7B. 成片字幕（用户要求字幕时：先提取审核后保留台词，再纠错、断行）
+  7B. 成片字幕（用户要求字幕时：先提取审核后保留台词 → 基础纠错 → 事实核验候选 → 人工确认 → 断行）
   8. 自进化学习（用户显式触发「已导出，学一下」）→ diff 抽规则 → 确认 → 写 经验规则.md → 团队 Git 沉淀
 
 模式 B（转字幕）:
   B-1 提取纯文本
   B-2 第一步：纠错（只改词，不断行）→ corrected.txt
+  B-2.5 审核后成片字幕的事实核验（有证据的候选，人工确认后才应用）→ fact_checked.txt
   B-3 第二步：断行（只格式化，不改字）→ subtitles_formatted.md
 ```
 
@@ -338,9 +341,9 @@ node "$SKILL_DIR/scripts/extract_retained_transcript.js" \
 
 脚本保留原始逐字 idx 与时间轴不变，只在新的字幕文本层排除最终选中的台词；审核时只选中的静音段不会误删文字。若缺少 `review_log.json` 或其中没有 `finalSelected`，**停止并提示用户先在审核页导出**，不得退回完整原始 ASR。
 
-然后按下方「模式 B」的 B-2、B-3 继续，但输入改为 `$BASE_DIR/4_字幕/retained_raw.txt`，输出改为同目录下的 `corrected.txt`、`uncertain.md` 与 `subtitles_formatted.md`。
+然后按下方「模式 B」的 B-2、B-2.5、B-3 继续，但输入改为 `$BASE_DIR/4_字幕/retained_raw.txt`，输出在同目录下。
 
-> 本阶段不自动全篇替换人名或专有名词。词形不确定时保留 ASR 原文并写入 `uncertain.md`；只有用户后续明确确认术语映射，才可增加项目术语校对步骤。
+> 本阶段的事实核验采用固定安全规则：**自动发现、自动搜索、自动给证据；人工确认后才应用。** 基础纠错不会自动全篇替换人名或专有名词；词形不确定时先保留 ASR 原文并写入 `uncertain.md`。
 
 ### 步骤 8: 自进化学习（用户显式触发）
 
@@ -397,9 +400,53 @@ node "$SKILL_DIR/scripts/extract_text.js" \
 4. 输出到与输入同一流程的纠错目录：直接模式为 `$BASE_DIR/2_纠错/corrected.txt`；审核后成片字幕为 `$BASE_DIR/4_字幕/corrected.txt`（每行一句，与输入 1:1 对应）
 5. 如有「不确定清单」，输出到同目录 `uncertain.md` 并在对话中列出给用户。人名、专有名词不确定时保留原 ASR，不得猜测后全篇替换。
 
+#### B-2.5 审核后成片字幕的事实核验（自动发现和搜索，人工确认）
+
+> 只用于已走完「步骤 7B」的成片字幕：它需要 `retained_transcript.json` 保留的逐字时间轴，当前不对直接转字幕模式伪造时间映射。
+
+1. 输入是完整的 `$BASE_DIR/4_字幕/corrected.txt`。模型先读全文生成**主题关键词 + 事实候选地图**，发现高风险的：人名、机构/公司、产品、地点、奖项、日期、数字、术语；有限核验名额必须优先给疑似 ASR 同音/形近错写和与事件名单不一致的实体，已正确事实后置。
+2. **绝不把全文直接作为搜索词，也不只拿主题搜索。** 每个候选的联网查询包必须是「候选原文变体 + 主题关键词 + 本地出现上下文」。
+3. 模型使用 **Doubao Seed 2.0 Lite**（配置名 `doubao-seed-2.0-lite` 会自动解析为当前 Responses API 端点 `doubao-seed-2-0-lite-260215`）和方舟内置 Web Search。模型不输出“建议”或 JSON，只填写固定标签文本；脚本严格翻译为 JSON 工件并收集 Web Search 来源。`ANSWER` 和 `CONFIDENCE` 是下游机器字段，`REASON` 只给人工审阅，不能驱动自动应用：
+
+   ```text
+   [ANSWER]
+   ANSWER: 邓玉 -> 邓煜
+   CONFIDENCE: 0.99
+   REASON: 北大官方名单列为邓煜
+   [/ANSWER]
+   ```
+
+   无法确认时只把 `ANSWER` 写为 `uncertain`。答案只能替换单一、短的实体/日期/术语；句子级或越界文本会被本地合同拒绝。已证实原文无误时，报告显示 `原文 -> 原文` 且无需应用。
+4. 脚本只写入 `4_字幕/事实核验/`，**绝不修改** `corrected.txt` 或 `subtitles_formatted.md`。先把 `fact_check_candidates.md` 给用户审阅并等待明确的候选 ID 决定。
+
+```bash
+# 先验证本机未提交的 ARK_API_KEY、模型和 Web Search 权限；不会显示 Key
+node "$SKILL_DIR/scripts/check_fact_check_config.js" \
+  --model "${FACT_CHECK_MODEL:-doubao-seed-2.0-lite}" --web-search
+
+# 自动生成事实地图、联网证据与人工审批模板；不会应用任何修改
+node "$SKILL_DIR/scripts/fact_check_subtitles.js" \
+  "$BASE_DIR/4_字幕" \
+  --model "${FACT_CHECK_MODEL:-doubao-seed-2.0-lite}"
+```
+
+生成后必须展示 `$BASE_DIR/4_字幕/事实核验/fact_check_candidates.md` 中的证据，并等待用户明确确认。例如：
+
+```bash
+# 用户确认后才记录决定；本命令仍不改字幕
+node "$SKILL_DIR/scripts/approve_fact_corrections.js" \
+  "$BASE_DIR/4_字幕" --approve FC-001,FC-003 --reject FC-002 --by "审核人"
+
+# 仅把获批准的精确出现位置写到独立文本层；保留 corrected.txt 不变
+node "$SKILL_DIR/scripts/apply_fact_corrections.js" "$BASE_DIR/4_字幕"
+# 输出：$BASE_DIR/4_字幕/fact_checked.txt
+```
+
+批准文件与候选文件绑定当前 `corrected.txt` 的 SHA-256；字幕或候选一旦变化，旧决定会被拒绝，必须重新核验。`fact_corrections_applied.json` 会记录每次实际替换对应的原始逐字索引和时间范围。
+
 #### B-3 第二步：断行（AI 处理）
 
-1. 读取纠错后的文本：直接模式为 `$BASE_DIR/2_纠错/corrected.txt`；审核后成片字幕为 `$BASE_DIR/4_字幕/corrected.txt`
+1. 读取纠错后的文本：直接模式为 `$BASE_DIR/2_纠错/corrected.txt`；审核后成片字幕在有人工批准的事实修改时读取 `$BASE_DIR/4_字幕/fact_checked.txt`，否则读取 `$BASE_DIR/4_字幕/corrected.txt`
 2. 读取 `$SKILL_DIR/用户习惯/断行prompt.md` 规则
 3. **只做格式化**，不改字、不删字、不加字
 4. 输出到：直接模式为视频所在目录 `$(dirname "$VIDEO_PATH")/subtitles_formatted.md`；审核后成片字幕为 `$BASE_DIR/4_字幕/subtitles_formatted.md`
@@ -414,6 +461,14 @@ node "$SKILL_DIR/scripts/extract_text.js" \
 ```
 VOLCENGINE_API_KEY=your_api_key_here
 ```
+
+事实核验使用方舟 Responses API，默认产品模型为 `doubao-seed-2.0-lite`；脚本会把这个产品名解析为当前正式端点 `doubao-seed-2-0-lite-260215`，可用 `FACT_CHECK_MODEL` 显式覆盖。如 `.env` 不在 skill 目录，可用 `ARK_ENV_FILE` 指向它：
+```
+ARK_API_KEY=your_ark_api_key_here
+FACT_CHECK_MODEL=doubao-seed-2.0-lite
+```
+
+方舟 Web Search 必须已开通。事实核验只向方舟发送审核后成片字幕与候选查询上下文，返回的来源会保存在本机项目输出目录；Key 永不写入候选、日志或 Git。
 
 去[新版控制台](https://console.volcengine.com/speech/new/overview)生成 **一个** API Key 即可——所有引擎共用这同一个 `VOLCENGINE_API_KEY`（均为新版控制台单 `X-Api-Key` 认证）。
 
