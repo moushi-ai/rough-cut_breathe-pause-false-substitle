@@ -147,6 +147,25 @@
       color: var(--paper-400);
     }
     .file-meta .file-sub .dot { color: var(--ember); margin: 0 6px; }
+    .stream-status {
+      display: none;
+      align-items: center;
+      gap: 6px;
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0.06em;
+      color: var(--warning);
+      white-space: nowrap;
+    }
+    .stream-status.show { display: inline-flex; }
+    .stream-status::before {
+      content: '';
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 12px currentColor;
+    }
+    .stream-status.complete { color: #5EEAD4; }
 
     button {
       padding: 8px 14px;
@@ -168,6 +187,12 @@
     }
     button:hover  { background: var(--ink-3); border-color: var(--paper-400); color: var(--paper-100); }
     button:active { transform: scale(0.97); }
+    button:disabled {
+      cursor: not-allowed;
+      opacity: .5;
+      transform: none;
+      pointer-events: none;
+    }
     button.ghost-tight {
       border: none;
       background: transparent;
@@ -807,6 +832,7 @@
       </div>
       <div class="file-meta">
         <div class="file-sub" id="fileSub">REVIEW <span class="dot">●</span> 加载中</div>
+        <div class="stream-status" id="streamStatus"></div>
       </div>
     </div>
     <div class="tb-center">
@@ -831,7 +857,7 @@
       <span class="time-display"><span id="timeCur">00:00</span><span class="sep">/</span><span id="timeTot">00:00</span></span>
     </div>
     <div class="tb-right">
-      <button class="primary" onclick="exportFCPXML()">导出 FCPXML</button>
+      <button class="primary" id="exportBtn" onclick="exportFCPXML()">导出 FCPXML</button>
       <div class="tb-sep"></div>
       <button class="danger" onclick="clearAll()" title="清空选择">清空</button>
     </div>
@@ -945,14 +971,23 @@
     let autoSelected = new Set();
     const selected = new Set();
     const aiSelectedIds = new Set();
+    // 流式结果到达时，AI 的新预选只能补到没有被剪辑同学亲手改过的位置。
+    // 否则后续批次会把“我已经取消勾选”的选择重新勾上。
+    const manualTouched = new Set();
     let reviewStartedAt = null;
     let reviewEditCount = 0;
+    let streamingReview = null;
+    let reviewRevision = -1;
+    let streamPollTimer = null;
 
     const video = document.getElementById('player');
     const timeCur = document.getElementById('timeCur');
     const timeTot = document.getElementById('timeTot');
     const content = document.getElementById('content');
     const loadingOverlay = document.getElementById('loadingOverlay');
+    const fileSub = document.getElementById('fileSub');
+    const streamStatusEl = document.getElementById('streamStatus');
+    const exportBtn = document.getElementById('exportBtn');
 
     let elements = [];
     let gapGroups = [];
@@ -986,22 +1021,99 @@
 
     const fetchJSON = (url) => fetch(url).then(r => r.ok ? r.json() : null).catch(() => null);
 
-    fetch('./data.json')
+    function isStreamingReview() {
+      return streamingReview && streamingReview.mode === 'streaming';
+    }
+
+    function updateReviewMeta() {
+      fileSub.innerHTML = `REVIEW <span class="dot">●</span> ${aiSelectedIds.size} 处 AI 预选`;
+      if (!isStreamingReview()) {
+        streamStatusEl.className = 'stream-status';
+        streamStatusEl.textContent = '';
+        exportBtn.disabled = false;
+        exportBtn.textContent = '导出 FCPXML';
+        exportBtn.title = '';
+        return;
+      }
+
+      const chunks = Array.isArray(streamingReview.chunks) ? streamingReview.chunks : [];
+      const ready = chunks.filter(chunk => chunk.status === 'ready').length;
+      const complete = streamingReview.status === 'complete';
+      streamStatusEl.className = 'stream-status show' + (complete ? ' complete' : '');
+      streamStatusEl.textContent = complete
+        ? `流式审核完成 · ${ready}/${chunks.length} 批已就绪`
+        : `流式分析中 · ${ready}/${chunks.length} 批已就绪`;
+      exportBtn.disabled = !complete;
+      exportBtn.textContent = complete ? '导出 FCPXML' : `等待分析 ${ready}/${chunks.length}`;
+      exportBtn.title = complete ? '' : '全部批次完成前不能导出，避免生成不完整工程';
+    }
+
+    function applyReviewData(data, { initial = false } = {}) {
+      if (!data || !Array.isArray(data.words)) throw new Error('审核数据缺少 words');
+      if (initial) {
+        words = data.words;
+        selected.clear();
+        aiSelectedIds.clear();
+        manualTouched.clear();
+        reviewStartedAt = new Date().toISOString();
+        reviewEditCount = 0;
+      } else if (data.words.length !== words.length) {
+        throw new Error('流式更新的逐字时间轴发生变化，已保留当前审核选择并停止合并');
+      }
+
+      const previousAuto = autoSelected;
+      const incomingAuto = new Set((data.autoSelected || []).filter(Number.isInteger));
+      // 已撤销的 AI 预选不会在本轮数据中继续作为“AI 预选”展示；如果剪辑同学没手动
+      // 碰过它，则同步撤销实际选择。正常流式发布只追加，仍保留这条以支持显式重发批次。
+      previousAuto.forEach(idx => {
+        if (incomingAuto.has(idx)) return;
+        const id = 'word-' + idx;
+        if (!manualTouched.has(id)) selected.delete(id);
+      });
+
+      autoSelected = incomingAuto;
+      aiSelectedIds.clear();
+      autoSelected.forEach(idx => {
+        const id = 'word-' + idx;
+        aiSelectedIds.add(id);
+        if (!manualTouched.has(id)) selected.add(id);
+      });
+
+      streamingReview = data.review && data.review.mode === 'streaming' ? data.review : null;
+      reviewRevision = isStreamingReview() ? (Number(streamingReview.revision) || 0) : -1;
+      markSegsDirty();
+      updateReviewMeta();
+      if (!initial && elements.length) refreshSelectionStyles();
+    }
+
+    function stopStreamPolling() {
+      if (streamPollTimer) clearTimeout(streamPollTimer);
+      streamPollTimer = null;
+    }
+
+    function scheduleStreamPolling() {
+      stopStreamPolling();
+      if (!isStreamingReview() || streamingReview.status === 'complete') return;
+      streamPollTimer = setTimeout(async () => {
+        const state = await fetchJSON('./api/review-state?at=' + Date.now());
+        const remoteRevision = Number(state?.revision);
+        if (state?.mode === 'streaming' && Number.isFinite(remoteRevision) && remoteRevision > reviewRevision) {
+          const data = await fetchJSON('./data.json?revision=' + remoteRevision + '&at=' + Date.now());
+          if (data) {
+            try { applyReviewData(data); } catch (error) { console.warn('流式审核更新被拒绝:', error.message); }
+          }
+        }
+        scheduleStreamPolling();
+      }, 1200);
+    }
+
+    fetch('./data.json?at=' + Date.now())
       .then(r => {
         if (!r.ok) throw new Error('data.json 未找到 (HTTP ' + r.status + ')，请确认步骤 6 已完成');
         return r.json();
       })
       .then(async (data) => {
-        words = data.words || [];
-        autoSelected = new Set(data.autoSelected || []);
-        reviewStartedAt = new Date().toISOString();
-        reviewEditCount = 0;
-        autoSelected.forEach(idx => {
-          const id = 'word-' + idx;
-          selected.add(id);
-          aiSelectedIds.add(id);
-        });
-        markSegsDirty();
+        applyReviewData(data, { initial: true });
 
         // 并行加载波形包络 + 静音段（任一缺失都不阻塞主流程）
         const [pk, sp] = await Promise.all([fetchJSON('./peaks.json'), fetchJSON('./silence_periods.json')]);
@@ -1010,15 +1122,12 @@
 
         initWave();
 
-        // 顶栏文件元信息
-        document.getElementById('fileSub').innerHTML =
-          `REVIEW <span class="dot">●</span> ${aiSelectedIds.size} 处 AI 预选`;
-
         loadingOverlay.classList.remove('show');
         clearInterval(msgTimer);
         render();
         initKnobs();
         initThemeSwitcher();
+        scheduleStreamPolling();
       })
       .catch(err => {
         clearInterval(msgTimer);
@@ -1562,9 +1671,9 @@
       });
     }
 
-    // ===== 撤销栈：每次编辑前快照 selected =====
+    // ===== 撤销栈：每次编辑前快照 selected + 手工覆盖标记 =====
     function pushUndo() {
-      undoStack.push(new Set(selected));
+      undoStack.push({ selected: new Set(selected), manualTouched: new Set(manualTouched) });
       if (undoStack.length > 100) undoStack.shift();
       if (reviewStartedAt) reviewEditCount += 1;
     }
@@ -1572,7 +1681,9 @@
       if (!undoStack.length) return;
       const prev = undoStack.pop();
       selected.clear();
-      prev.forEach(id => selected.add(id));
+      prev.selected.forEach(id => selected.add(id));
+      manualTouched.clear();
+      prev.manualTouched.forEach(id => manualTouched.add(id));
       markSegsDirty();
       refreshSelectionStyles();
       if (reviewStartedAt) reviewEditCount += 1;
@@ -1611,6 +1722,7 @@
       for (let j = lo; j <= hi; j++) {
         const id = 'word-' + elements[j].idx;
         mode === 'add' ? selected.add(id) : selected.delete(id);
+        manualTouched.add(id);
         const w = elements[j].word;
         if (w.start < tMin) tMin = w.start;
         if (w.end > tMax) tMax = w.end;
@@ -1671,7 +1783,10 @@
         pushUndo();
         const ids = JSON.parse(pd.target.dataset.gapGroup).map(i => 'word-' + i);
         const add = !ids.every(id => selected.has(id));
-        ids.forEach(id => add ? selected.add(id) : selected.delete(id));
+        ids.forEach(id => {
+          add ? selected.add(id) : selected.delete(id);
+          manualTouched.add(id);
+        });
         markSegsDirty();
         refreshSelectionStyles();
       } else {
@@ -1846,14 +1961,29 @@
     video.addEventListener('loadedmetadata', () => {
       timeTot.textContent = formatTime(video.duration || 0);
     });
-    function clearAll() { pushUndo(); selected.clear(); markSegsDirty(); render(); }
+    function clearAll() {
+      pushUndo();
+      selected.clear();
+      words.forEach((_, idx) => manualTouched.add('word-' + idx));
+      markSegsDirty();
+      render();
+    }
     function applySilenceThreshold(threshold) {
       pushUndo();
-      words.forEach((w, idx) => { if (w.isGap) selected.delete('word-' + idx); });
+      words.forEach((w, idx) => {
+        if (!w.isGap) return;
+        const id = 'word-' + idx;
+        selected.delete(id);
+        manualTouched.add(id);
+      });
       buildGapGroups();
       gapGroups.forEach(group => {
         if (group.duration >= threshold) {
-          group.indices.forEach(idx => selected.add('word-' + idx));
+          group.indices.forEach(idx => {
+            const id = 'word-' + idx;
+            selected.add(id);
+            manualTouched.add(id);
+          });
         }
       });
       markSegsDirty();
@@ -1861,6 +1991,12 @@
     }
 
     async function exportFCPXML() {
+      if (isStreamingReview() && streamingReview.status !== 'complete') {
+        const chunks = streamingReview.chunks || [];
+        const ready = chunks.filter(chunk => chunk.status === 'ready').length;
+        alert(`后续批次仍在分析（${ready}/${chunks.length} 批已就绪）。\n\n你可以继续审核已完成部分；全部完成后才可导出完整 FCPXML。`);
+        return;
+      }
       const segments = getDeleteSegments();
       if (!segments.length) { alert('没有选中任何片段'); return; }
       // 把「你最终选中的词级 idx」一并送给服务器，供自进化学习写 review_log.json。

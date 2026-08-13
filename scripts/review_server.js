@@ -14,9 +14,12 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { buildFcpxml } = require('./lib/fcpxml');
+const { getPublicReviewState } = require('./lib/review_stream');
 
 const PORT = process.argv[2] || 8899;
 const VIDEO_FILE = process.argv[3];
+// 审核页只供本机剪辑同学使用。显式绑到 loopback，避免默认 0.0.0.0 把源视频暴露给局域网。
+const HOST = '127.0.0.1';
 
 if (!VIDEO_FILE) {
   console.error('❌ 错误: 必须指定视频文件路径');
@@ -40,16 +43,19 @@ try {
   console.warn('⚠️ 读取 silence_periods.json 失败，末尾裁剪已跳过');
 }
 
-// 自进化学习需要的原料：词级文本（重建上下文）+ AI 初选 idx（diff 基线）。
-// 都在 data.json（generate_review.js 生成，与本进程同在 3_审核/）里，启动时读一次。
-let reviewWords = [];
-let aiSelectedIdx = [];
-try {
-  const d = JSON.parse(fs.readFileSync('data.json', 'utf8'));
-  reviewWords = Array.isArray(d.words) ? d.words : [];
-  aiSelectedIdx = Array.isArray(d.autoSelected) ? d.autoSelected : [];
-} catch (e) {
-  console.warn('⚠️ 读取 data.json 失败，导出时将无法生成 review_log.json（自进化学习日志）');
+// data.json 可能由 publish_review_chunk.js 原子更新。导出与审核状态接口必须按请求
+// 读取最新版本，不能沿用服务启动时的 AI 初选，否则流式审核会丢后续批次。
+function readReviewData() {
+  const data = JSON.parse(fs.readFileSync('data.json', 'utf8'));
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('data.json 不是对象');
+  }
+  return data;
+}
+
+function sendJson(res, statusCode, payload) {
+  res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(payload));
 }
 
 // 完整模型 A/B 会在审核目录写入仅含 A/B 标签的元数据。它不影响普通审核，
@@ -106,8 +112,10 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  const requestPath = req.url.split('?')[0];
+
   // 共享切割算法模块：从 scripts/lib 单一来源直供前端，避免拷贝漂移
-  if (req.method === 'GET' && req.url.split('?')[0] === '/lib/compute_keeps.js') {
+  if (req.method === 'GET' && requestPath === '/lib/compute_keeps.js') {
     const libPath = path.join(__dirname, 'lib', 'compute_keeps.js');
     if (fs.existsSync(libPath)) {
       res.writeHead(200, { 'Content-Type': 'application/javascript' });
@@ -119,8 +127,20 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // 审核页以短轮询读取此状态；只有 revision 变化时才重新拉完整 data.json。
+  // 读取失败时明确返回错误，前端保留已经加载的审核选择，绝不清空用户编辑。
+  if (req.method === 'GET' && requestPath === '/api/review-state') {
+    try {
+      const data = readReviewData();
+      sendJson(res, 200, getPublicReviewState(data));
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: '读取审核状态失败: ' + error.message });
+    }
+    return;
+  }
+
   // 视频文件代理（原始视频不在当前目录时使用）
-  if (req.method === 'GET' && req.url.startsWith('/video')) {
+  if (req.method === 'GET' && requestPath.startsWith('/video')) {
     if (!VIDEO_FILE || !fs.existsSync(VIDEO_FILE)) {
       res.writeHead(404);
       res.end('Video not found');
@@ -153,7 +173,7 @@ const server = http.createServer((req, res) => {
   }
 
   // API: 导出 FCPXML
-  if (req.method === 'POST' && req.url === '/api/fcpxml') {
+  if (req.method === 'POST' && requestPath === '/api/fcpxml') {
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', () => {
@@ -164,6 +184,18 @@ const server = http.createServer((req, res) => {
         const cutOpts = (parsed && !Array.isArray(parsed) && parsed.opts) ? parsed.opts : undefined;
         const finalSelected = (parsed && !Array.isArray(parsed) && Array.isArray(parsed.finalSelected)) ? parsed.finalSelected : null;
         const reviewSession = (parsed && !Array.isArray(parsed)) ? sanitizeReviewSession(parsed.reviewSession) : null;
+
+        const reviewData = readReviewData();
+        const streamState = getPublicReviewState(reviewData);
+        if (streamState.mode === 'streaming' && streamState.status !== 'complete') {
+          sendJson(res, 409, {
+            success: false,
+            error: `流式审核尚未完成（${streamState.chunks.filter(chunk => chunk.status === 'ready').length}/${streamState.chunks.length} 批已就绪），请等待后续批次分析完成`,
+          });
+          return;
+        }
+        const reviewWords = Array.isArray(reviewData.words) ? reviewData.words : [];
+        const aiSelectedIdx = Array.isArray(reviewData.autoSelected) ? reviewData.autoSelected : [];
 
         // FCPXML 生成（含 ffprobe 探测 + 切割算法）抽到 lib/fcpxml.js，便于单测
         const { xml, outputPath: outputFcpxml, finalKeeps, baseName } = buildFcpxml({
@@ -217,6 +249,7 @@ const server = http.createServer((req, res) => {
               finalSelected,
               segments: finalKeeps.length,
               reviewSession,
+              streaming: streamState.mode === 'streaming' ? streamState : null,
               ab: abReviewMeta,
               diff: {
                 说明: 'aiOnly=AI想删但你保留了(可能AI过删，该收敛规则)；userOnly=你删了但AI没想到(可能AI漏删，该补规则)',
@@ -234,20 +267,18 @@ const server = http.createServer((req, res) => {
           console.warn('⚠️ 生成 review_log.json 失败（不影响导出）: ' + logErr.message);
         }
 
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, output: outputFcpxml, segments: finalKeeps.length }));
+        sendJson(res, 200, { success: true, output: outputFcpxml, segments: finalKeeps.length });
       } catch (err) {
         console.error('❌ FCPXML 导出失败:', err.message);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: err.message }));
+        sendJson(res, 500, { success: false, error: err.message });
       }
     });
     return;
   }
 
   // API: 下载文件
-  if (req.method === 'GET' && req.url.startsWith('/api/download/')) {
-    const encodedFileName = req.url.replace('/api/download/', '');
+  if (req.method === 'GET' && requestPath.startsWith('/api/download/')) {
+    const encodedFileName = requestPath.replace('/api/download/', '');
     const fileName = decodeURIComponent(encodedFileName);
     const filePath = path.resolve(fileName);
     if (!fs.existsSync(filePath)) {
@@ -273,7 +304,7 @@ const server = http.createServer((req, res) => {
   }
 
   // 静态文件服务（从当前目录读取）
-  let filePath = req.url === '/' ? '/review.html' : req.url;
+  let filePath = requestPath === '/' ? '/review.html' : requestPath;
   filePath = '.' + filePath;
 
   const ext = path.extname(filePath);
@@ -314,7 +345,7 @@ const server = http.createServer((req, res) => {
   fs.createReadStream(filePath).pipe(res);
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
   // 落地两个文件到当前目录（3_审核/），让 agent / 用户随时能找到地址并重启：
   //   server_url.txt      — 浏览器要打开的地址
   //   .review_server.pid  — 进程号，用于停止/排障（kill $(cat .review_server.pid)）

@@ -2,7 +2,7 @@
 /**
  * 自动识别并删除低风险口癖与已确认的录制口令。
  *
- * 用法: node auto_filler.js <sentence_map.json> <subtitles_words.json> <speech_errors.json>
+ * 用法: node auto_filler.js <sentence_map.json> <subtitles_words.json> <speech_errors.json> [--sentence-range <起句> <止句>]
  *
  * 行为:
  *   - 读取 speech_errors.json 中已有的 delete_sentences（整句删除句号）
@@ -25,15 +25,37 @@
 
 const fs = require('fs');
 
-const [, , mapFile, wordsFile, errorsFile] = process.argv;
+const args = process.argv.slice(2);
+const positional = [];
+let sentenceRange = null;
+for (let i = 0; i < args.length; i++) {
+  const arg = args[i];
+  if (arg !== '--sentence-range') {
+    positional.push(arg);
+    continue;
+  }
+  const start = Number(args[++i]);
+  const end = Number(args[++i]);
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start) {
+    console.error('用法: --sentence-range <起句> <止句>（均为非负整数，且起句 ≤ 止句）');
+    process.exit(1);
+  }
+  sentenceRange = { start, end };
+}
+
+const [mapFile, wordsFile, errorsFile] = positional;
 if (!mapFile || !wordsFile || !errorsFile) {
-  console.error('用法: node auto_filler.js <sentence_map.json> <subtitles_words.json> <speech_errors.json>');
+  console.error('用法: node auto_filler.js <sentence_map.json> <subtitles_words.json> <speech_errors.json> [--sentence-range <起句> <止句>]');
   process.exit(1);
 }
 
 const map = JSON.parse(fs.readFileSync(mapFile, 'utf8'));
 const words = JSON.parse(fs.readFileSync(wordsFile, 'utf8'));
 const errors = JSON.parse(fs.readFileSync(errorsFile, 'utf8'));
+if (sentenceRange && sentenceRange.end >= map.length) {
+  console.error(`句号范围越界: ${sentenceRange.start}-${sentenceRange.end}，当前只有 ${map.length} 句`);
+  process.exit(1);
+}
 
 const deletedSentences = new Set(errors.delete_sentences || []);
 const existingIdx = new Set(errors.delete_idx || []);
@@ -94,7 +116,9 @@ function markRecordingCues(seq, toDelete) {
 const addedIdx = new Set();
 const log = [];
 
-for (let s = 0; s < map.length; s++) {
+const scanStart = sentenceRange ? sentenceRange.start : 0;
+const scanEnd = sentenceRange ? sentenceRange.end : map.length - 1;
+for (let s = scanStart; s <= scanEnd; s++) {
   if (deletedSentences.has(s)) continue;
   const { startIdx, endIdx } = map[s];
   const seq = [];
@@ -173,5 +197,5 @@ errors.delete_idx = merged;
 fs.writeFileSync(errorsFile, JSON.stringify(errors, null, 2));
 
 console.log(log.join('\n'));
-console.log(`\n自动口癖: ${log.length} 句, 新增 idx ${addedIdx.size} 个`);
+console.log(`\n自动口癖: 扫描句${scanStart}-${scanEnd}，${log.length} 句命中，新增 idx ${addedIdx.size} 个`);
 console.log(`speech_errors.delete_idx 合并后总计 ${merged.length} 个`);

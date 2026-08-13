@@ -2,21 +2,36 @@
 /**
  * 生成审核数据文件 + 复制前端模板
  *
- * 用法: node generate_review.js <subtitles_words.json> <auto_selected.json> <audio_file> [输出目录]
+ * 用法: node generate_review.js <subtitles_words.json> <auto_selected.json> <audio_file> [输出目录] [--stream-manifest <review_chunks.json>]
  * 输出: data.json + review.html (from templates/) + audio.mp3
  */
 
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
+const { createStreamingReviewState, writeJsonAtomic } = require('./lib/review_stream');
 
-const subtitlesFile = process.argv[2];
-const autoSelectedFile = process.argv[3];
-const audioFile = process.argv[4];
-const outDir = process.argv[5] || '.';
+const args = process.argv.slice(2);
+const positional = [];
+let streamManifestFile = null;
+for (let index = 0; index < args.length; index++) {
+  const arg = args[index];
+  if (arg === '--stream-manifest') {
+    streamManifestFile = args[++index];
+    if (!streamManifestFile) {
+      console.error('用法: --stream-manifest <review_chunks.json>');
+      process.exit(1);
+    }
+    continue;
+  }
+  positional.push(arg);
+}
+
+const [subtitlesFile, autoSelectedFile, audioFile, requestedOutDir] = positional;
+const outDir = requestedOutDir || '.';
 
 if (!subtitlesFile || !autoSelectedFile || !audioFile) {
-  console.error('用法: node generate_review.js <subtitles_words.json> <auto_selected.json> <audio_file> [输出目录]');
+  console.error('用法: node generate_review.js <subtitles_words.json> <auto_selected.json> <audio_file> [输出目录] [--stream-manifest <review_chunks.json>]');
   process.exit(1);
 }
 
@@ -52,7 +67,24 @@ const data = {
   autoSelected,
   generatedAt: new Date().toISOString()
 };
-fs.writeFileSync(path.join(outDir, 'data.json'), JSON.stringify(data, null, 2));
+if (streamManifestFile) {
+  if (!fs.existsSync(streamManifestFile)) {
+    console.error('❌ 找不到流式分段清单:', streamManifestFile);
+    process.exit(1);
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(streamManifestFile, 'utf8'));
+    data.review = createStreamingReviewState(manifest);
+    // 原始静音预选作为稳定基线；后续每批语义结果只追加，不会覆盖它。
+    data.baseAutoSelected = [...new Set(autoSelected)].sort((a, b) => a - b);
+    console.log(`🧩 流式审核: ${data.review.chunks.length} 批，首批已标记为分析中`);
+  } catch (error) {
+    console.error('❌ 无法初始化流式审核状态:', error.message);
+    process.exit(1);
+  }
+}
+writeJsonAtomic(path.join(outDir, 'data.json'), data);
 console.log('已生成 data.json');
 
 // ── 复制音频文件 ──────────────────────────────────────────
