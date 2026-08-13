@@ -113,7 +113,7 @@ try {
       aiSelected: [0, 1],
       finalSelected: [0, 1],
       deleteList: [{ start: 0, end: 0.8 }],
-      opts: { lookBack: 0.6, padStart: 0.05, padEnd: 0.05, minInternalSilence: 0.2 },
+      opts: { lookBack: 0.6, padStart: 0.05, padEnd: 0.05, minInternalSilence: 0.4 },
       reviewSession: { durationSeconds: 12, editCount: 1 },
       ab: { variant },
     });

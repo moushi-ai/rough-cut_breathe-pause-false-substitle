@@ -822,7 +822,7 @@
         <option value="1.5">1.5×</option>
         <option value="2">2×</option>
       </select>
-      <select id="silenceThreshold" onchange="applySilenceThreshold(parseFloat(this.value))" title="一键勾选逐字稿里 ≥ 此长度的停顿为「删除」（红色），你还能手动改。&#10;注意区别于切割参数的「内部静音切割」：那是导出时自动切掉保留段内残留的静音（黄色）。">
+      <select id="silenceThreshold" onchange="applySilenceThreshold(parseFloat(this.value))" title="一键勾选逐字稿里 ≥ 此长度的停顿为「删除」（红色），你还能手动改。&#10;注意区别于切割参数的「内部静音切割（≥ 0.4 秒）」：那是导出时自动切掉保留段内残留的静音（黄色）。">
         <option value="0.2" selected>静音 ≥ 0.2s</option>
         <option value="0.3">静音 ≥ 0.3s</option>
         <option value="0.5">静音 ≥ 0.5s</option>
@@ -971,7 +971,7 @@
     let peaksData = null;          // { duration, sampleRate, peaks:[0..1] }
     let silencePeriods = [];       // ffmpeg 检测的静音段
     let cutOpts = {                // 切割参数（与 lib/compute_keeps.js 默认一致，可被滑块覆盖）
-      lookBack: 0.6, padStart: 2 / 30, padEnd: 2 / 30, minInternalSilence: 0.2
+      lookBack: 0.6, padStart: 2 / 30, padEnd: 2 / 30, minInternalSilence: 0.4
     };
 
     loadingOverlay.classList.add('show');

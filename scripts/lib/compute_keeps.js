@@ -25,7 +25,7 @@
     lookBack: 0.6,           // 删除点前后多大窗口内寻找静音作为吸附切点
     padFrames: 2 / 30,       // 吸附后给说话者留的喘气余量（秒）
     edgeMargin: 0.05,        // 保留段边缘此范围内的静音不算「内部静音」
-    minInternalSilence: 0.2, // 保留段内部 ≥ 此长度的静音会被二次切掉（换气/未识别停顿）
+    minInternalSilence: 0.4, // 保留段内部 ≥ 此长度的静音会被二次切掉（换气/未识别停顿）
   };
 
   function normalizeSpokenWords(spokenWords) {

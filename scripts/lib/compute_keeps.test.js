@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('assert');
-const { computeFinalKeeps } = require('./compute_keeps');
+const { computeFinalKeeps, DEFAULTS } = require('./compute_keeps');
 
 const words = [
   { text: '甲', start: 0, end: 1, isGap: false },
@@ -33,5 +33,37 @@ for (const keep of keeps) {
     assert(!(word.start < keep.end && keep.end < word.end), '终点不能落在字中');
   }
 }
+
+// 内部静音默认阈值是 0.4 秒；更短的自然气口不应被拆段。
+const thresholdWords = [
+  { text: '甲', start: 0, end: 0.8, isGap: false },
+  { text: '乙', start: 1.25, end: 2, isGap: false },
+];
+const shortInternalSilence = computeFinalKeeps(
+  [],
+  [{ start: 0.8, end: 1.15 }],
+  2,
+  undefined,
+  thresholdWords,
+);
+const longInternalSilence = computeFinalKeeps(
+  [],
+  [{ start: 0.8, end: 1.25 }],
+  2,
+  undefined,
+  thresholdWords,
+);
+const legacyExplicitThreshold = computeFinalKeeps(
+  [],
+  [{ start: 0.8, end: 1.15 }],
+  2,
+  { minInternalSilence: 0.2 },
+  thresholdWords,
+);
+
+assert.strictEqual(DEFAULTS.minInternalSilence, 0.4, '默认内部静音阈值应为 0.4 秒');
+assert.strictEqual(shortInternalSilence.length, 1, '短于 0.4 秒的内部气口不应自动拆段');
+assert.strictEqual(longInternalSilence.length, 2, '长于 0.4 秒的内部静音应自动拆段');
+assert.strictEqual(legacyExplicitThreshold.length, 2, '历史审核页显式传入的阈值仍应按其值执行');
 
 console.log(`compute_keeps safety test passed (${keeps.length} keeps)`);
