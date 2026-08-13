@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 自动识别并删除口癖（单字语气词 + 句首/句尾废词 + 任意位置的"然后"）
+ * 自动识别并删除低风险口癖与已确认的录制口令。
  *
  * 用法: node auto_filler.js <sentence_map.json> <subtitles_words.json> <speech_errors.json>
  *
@@ -10,11 +10,14 @@
  *   - 与 speech_errors.json 中已有的 delete_idx 合并去重后写回
  *
  * 删除规则:
- *   1) 任意位置：呃、嗯、额(排除"额外/金额"等真词)、诶、欸、唉、噢
- *   2) 句首：然后/那么/好的（两字）、哦/哎/呀/对/那（单字，"那"需排除"那个/那么/那里"等）
- *   3) 任意位置：然后（用户偏好：宁可手动加回）
+ *   1) 录制口令：精确删除 321 / 三二一；即使与正文黏连也只删口令本身
+ *   2) 任意位置：呃、嗯、额(排除"额外/金额"等真词)、诶、欸、唉、噢
+ *   3) 句首：那么/好的（两字）、哦/哎/呀/对/那（单字，"那"需排除"那个/那么/那里"等）
  *   4) 句尾：对、哦
- *   规则 2/4 仅在删除后剩余 > 3-4 字时执行，避免句子被掏空
+ *   规则 3/4 仅在删除后剩余 > 3-4 字时执行，避免句子被掏空
+ *
+ * “然后”不能按位置自动删除：它可能表达真实的先后、因果或操作顺序。
+ * 自动层一律保留，由语义分析层在明确无功能时才人工预选；不确定就保留。
  *
  * 团队经验规则：自然语气词“啊”“呢”默认保留。独立/连续填充的“啊”，以及
  * 明显无功能的“呢”，由语义分析层按上下文标整句或词级候选，不能靠此处的位置硬规则删除。
@@ -41,6 +44,52 @@ const EDGE_TAIL = new Set(['对', '哦']);
 const NA_FOLLOW = new Set(['个', '么', '里', '种', '时', '样', '边', '些', '位', '段', '次', '天', '年', '场']);
 const E_AFTER = new Set(['外', '度', '头']);
 const E_BEFORE = new Set(['金', '余', '差', '份', '配', '名', '限']);
+const CUE_UNITS = new Set(['年', '月', '日', '天', '个', '次', '位', '人', '元', '块', '万', '亿', '吨', '米', '秒', '分', '小', '%', '％']);
+
+function isArabicNumber(text) {
+  return /^\d+$/.test(String(text || ''));
+}
+
+function isAsciiLetter(text) {
+  return /^[A-Za-z]+$/.test(String(text || ''));
+}
+
+function hasFactNumberContext(seq, start, width) {
+  const before = seq[start - 1]?.c;
+  const after = seq[start + width]?.c;
+  return isArabicNumber(before) || isArabicNumber(after) || isAsciiLetter(before) || isAsciiLetter(after) || CUE_UNITS.has(after);
+}
+
+function markRecordingCues(seq, toDelete) {
+  for (let i = 0; i < seq.length; i++) {
+    const current = seq[i];
+    if (current.isRecordingCue) {
+      toDelete.add(i);
+      continue;
+    }
+
+    // 兼容历史转录：口令可能尚未由 generate_subtitles.js 标记为 isRecordingCue。
+    // 对疑似事实数值（如 321年 / 1321 / 3210）保持保守，不自动删除。
+    if ((current.c === '321' || current.c === '三二一') && !hasFactNumberContext(seq, i, 1)) {
+      toDelete.add(i);
+      continue;
+    }
+
+    // 火山会把“三二一”拆成三个词。只在三词连续且不带数量单位时精确删除这三词；
+    // 绝不连带删除其后的“好了 / 但问题是”等正文。
+    if (
+      current.c === '三' &&
+      seq[i + 1]?.c === '二' &&
+      seq[i + 2]?.c === '一' &&
+      !hasFactNumberContext(seq, i, 3)
+    ) {
+      toDelete.add(i);
+      toDelete.add(i + 1);
+      toDelete.add(i + 2);
+      i += 2;
+    }
+  }
+}
 
 const addedIdx = new Set();
 const log = [];
@@ -50,11 +99,16 @@ for (let s = 0; s < map.length; s++) {
   const { startIdx, endIdx } = map[s];
   const seq = [];
   for (let i = startIdx; i <= endIdx; i++) {
-    if (!words[i].isGap) seq.push({ idx: i, c: words[i].text });
+    if (!words[i].isGap) {
+      seq.push({ idx: i, c: words[i].text, isRecordingCue: words[i].isRecordingCue === true });
+    }
   }
   if (seq.length === 0) continue;
 
   const toDelete = new Set();
+
+  // 0) 用户已确认的倒数口令。它是录制废料而非编辑判断，因此不受短句保护影响。
+  markRecordingCues(seq, toDelete);
 
   // 1) 单字语气词（任意位置）
   for (let i = 0; i < seq.length; i++) {
@@ -85,8 +139,7 @@ for (let s = 0; s < map.length; s++) {
     const c = seq[f].c;
     const c2 = seq[f + 1]?.c;
     if (remainLen() > 4) {
-      if ((c === '然' && c2 === '后') ||
-          (c === '那' && c2 === '么') ||
+      if ((c === '那' && c2 === '么') ||
           (c === '好' && c2 === '的')) {
         toDelete.add(f); toDelete.add(f + 1); changed = true; continue;
       }
@@ -97,15 +150,7 @@ for (let s = 0; s < map.length; s++) {
     }
   }
 
-  // 3) 任意位置的"然后"（用户偏好：全删）
-  for (let i = 0; i + 1 < seq.length; i++) {
-    if (toDelete.has(i) || toDelete.has(i + 1)) continue;
-    if (seq[i].c === '然' && seq[i + 1].c === '后') {
-      toDelete.add(i); toDelete.add(i + 1);
-    }
-  }
-
-  // 4) 句尾废词（反复回退）
+  // 3) 句尾废词（反复回退）
   changed = true;
   while (changed) {
     changed = false;

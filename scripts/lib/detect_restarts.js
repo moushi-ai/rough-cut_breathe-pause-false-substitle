@@ -14,6 +14,8 @@ const DEFAULT_OPTIONS = Object.freeze({
   minLaterExtensionTokens: 3,
   maxSourceTrailingContentTokens: 1,
   maxFollowingSentences: 3,
+  // 倒数口令是强重录分隔符。只扩大“待审核线索”的搜索范围，不会直接删除任何内容。
+  maxCueSeparatedSentences: 12,
   // ASR 可能在完整重说前插入人名、引导词或一两个错词；保留足够窗口给语义层复核。
   maxRestartPrefixSkip: 24,
   maxInlineSentenceTokens: 320,
@@ -21,6 +23,7 @@ const DEFAULT_OPTIONS = Object.freeze({
 
 const NON_LEXICAL = new Set(['啊', '呀', '呢', '吧', '嘛', '哦', '噢', '哎', '诶', '欸', '嗯', '呃', '额']);
 const PRONOUN_EQUIVALENTS = new Set(['他', '她', '它']);
+const CUE_UNITS = new Set(['年', '月', '日', '天', '个', '次', '位', '人', '元', '块', '万', '亿', '吨', '米', '秒', '分', '小', '%', '％']);
 
 function normalizeToken(text) {
   return String(text || '')
@@ -45,6 +48,42 @@ function joinTokens(tokens) {
   return tokens.map(token => token.text).join('');
 }
 
+function isArabicNumber(text) {
+  return /^\d+$/.test(String(text || ''));
+}
+
+function isAsciiLetter(text) {
+  return /^[A-Za-z]+$/.test(String(text || ''));
+}
+
+function hasFactNumberContext(tokens, start, width) {
+  const before = tokens[start - 1]?.text;
+  const after = tokens[start + width]?.text;
+  return isArabicNumber(before) || isArabicNumber(after) || isAsciiLetter(before) || isAsciiLetter(after) || CUE_UNITS.has(after);
+}
+
+function recordingCueTokenPositions(tokens) {
+  const positions = [];
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token.isRecordingCue) {
+      positions.push(index);
+      continue;
+    }
+    if ((token.text === '321' || token.text === '三二一') && !hasFactNumberContext(tokens, index, 1)) {
+      positions.push(index);
+      continue;
+    }
+    const chineseCue = token.text === '三' && tokens[index + 1]?.text === '二' && tokens[index + 2]?.text === '一';
+    const asciiCue = token.text === '3' && tokens[index + 1]?.text === '2' && tokens[index + 2]?.text === '1';
+    if ((chineseCue || asciiCue) && !hasFactNumberContext(tokens, index, 3)) {
+      positions.push(index, index + 1, index + 2);
+      index += 2;
+    }
+  }
+  return positions;
+}
+
 function makeSentence(words, sentence, sentenceIndex) {
   const tokens = [];
   for (let idx = sentence.startIdx; idx <= sentence.endIdx; idx++) {
@@ -53,14 +92,17 @@ function makeSentence(words, sentence, sentenceIndex) {
     const text = String(word.text || '');
     const normalized = normalizeToken(text);
     if (!normalized) continue;
-    tokens.push({ idx, text, normalized, matchKey: matchKey(normalized) });
+    tokens.push({ idx, text, normalized, matchKey: matchKey(normalized), isRecordingCue: word.isRecordingCue === true });
   }
+  const cuePositions = recordingCueTokenPositions(tokens);
+  const cuePositionSet = new Set(cuePositions);
   return {
     sentenceIndex,
     tokens,
     // 语气词可保留在原文和建议范围中，但不应把同一表达式的长重说拆断。
-    matchTokens: tokens.filter(isContent),
+    matchTokens: tokens.filter((token, position) => isContent(token) && !cuePositionSet.has(position)),
     text: joinTokens(tokens),
+    recordingCues: cuePositions.map(position => ({ idx: tokens[position].idx, text: tokens[position].text })),
   };
 }
 
@@ -124,7 +166,7 @@ function buildCandidate({ kind, source, restart, sourceStartToken, suggestedEndT
   return candidate;
 }
 
-function findBestNearbySentenceRestart(source, restart, options) {
+function findBestNearbySentenceRestart(source, restart, options, kind = 'nearby-sentence-restart') {
   let best = null;
   const sourceTokens = source.matchTokens;
   const restartTokens = restart.matchTokens;
@@ -140,7 +182,7 @@ function findBestNearbySentenceRestart(source, restart, options) {
       if (countContent(laterExtension) < options.minLaterExtensionTokens) continue;
 
       const candidate = buildCandidate({
-        kind: 'nearby-sentence-restart',
+        kind,
         source,
         restart,
         sourceStartToken: sourceTokens[sourceStart],
@@ -154,6 +196,25 @@ function findBestNearbySentenceRestart(source, restart, options) {
     }
   }
   return best;
+}
+
+function cuesBetween(source, restart, recordingCues) {
+  const sourceEndIdx = source.tokens[source.tokens.length - 1]?.idx;
+  const restartEndIdx = restart.tokens[restart.tokens.length - 1]?.idx;
+  if (!Number.isInteger(sourceEndIdx) || !Number.isInteger(restartEndIdx)) return [];
+  // 允许口令位于后一版的开头（如“321但问题是……”），此时它仍是两版之间的分隔符。
+  return recordingCues.filter(cue => cue.idx > sourceEndIdx && cue.idx <= restartEndIdx);
+}
+
+function applyCueSignal(candidate, cues) {
+  if (!candidate) return null;
+  candidate.recordingCue = {
+    strength: 'strong',
+    indices: cues.map(cue => cue.idx),
+    text: cues.map(cue => cue.text).join(''),
+  };
+  candidate.reviewInstruction = '倒数口令是强重录分隔信号：仅作待审核线索。先确认后一版更完整、前一版没有独有信息，才把前段写入 delete_idx；即使候选跨多句，也不得跳过语义确认。';
+  return candidate;
 }
 
 function findBestInlineRestart(sentence, options) {
@@ -198,6 +259,7 @@ function detectRestartCandidates({ words, sentenceMap, options = {} }) {
   if (!Array.isArray(sentenceMap)) throw new TypeError('sentenceMap 必须是数组');
   const config = { ...DEFAULT_OPTIONS, ...options };
   const sentences = sentenceMap.map((sentence, index) => makeSentence(words, sentence, index));
+  const recordingCues = sentences.flatMap(sentence => sentence.recordingCues);
   const candidates = [];
 
   for (let index = 0; index < sentences.length; index++) {
@@ -212,17 +274,47 @@ function detectRestartCandidates({ words, sentenceMap, options = {} }) {
       if (!bestNearby || candidate._score > bestNearby._score) bestNearby = candidate;
     }
     if (bestNearby) candidates.push(bestNearby);
+
+    let bestCueSeparated = null;
+    const maxCueRestartIndex = Math.min(sentences.length - 1, index + config.maxCueSeparatedSentences);
+    for (let restartIndex = index + 1; restartIndex <= maxCueRestartIndex; restartIndex++) {
+      const restart = sentences[restartIndex];
+      const cues = cuesBetween(source, restart, recordingCues);
+      if (cues.length === 0) continue;
+      const candidate = findBestNearbySentenceRestart(source, restart, config, 'cue-separated-restart');
+      if (!candidate) continue;
+      applyCueSignal(candidate, cues);
+      if (!bestCueSeparated || candidate._score > bestCueSeparated._score) bestCueSeparated = candidate;
+    }
+    if (bestCueSeparated) candidates.push(bestCueSeparated);
   }
 
-  candidates.sort((a, b) => (
+  // 同一对锚点既可能是普通邻句重说，也可能被倒数口令分隔。保留信号更强的后者，减少审核噪音。
+  const deduplicated = new Map();
+  for (const candidate of candidates) {
+    const key = [
+      candidate.sourceSentence,
+      candidate.restartSentence,
+      candidate.suggestedDelete.startIdx,
+      candidate.suggestedDelete.endIdx,
+      candidate.restartAnchor.startIdx,
+      candidate.restartAnchor.endIdx,
+    ].join(':');
+    const existing = deduplicated.get(key);
+    if (!existing || (candidate.kind === 'cue-separated-restart' && existing.kind !== 'cue-separated-restart')) {
+      deduplicated.set(key, candidate);
+    }
+  }
+  const uniqueCandidates = [...deduplicated.values()];
+  uniqueCandidates.sort((a, b) => (
     a.suggestedDelete.startIdx - b.suggestedDelete.startIdx ||
     a.restartAnchor.startIdx - b.restartAnchor.startIdx
   ));
   return {
     schemaVersion: 1,
     generatedBy: 'detect_restarts.js',
-    strategy: 'suffix-prefix-and-inline-repeat-v1',
-    candidates: candidates.map(stripPrivateFields),
+    strategy: 'suffix-prefix-and-inline-repeat-with-recording-cue-v2',
+    candidates: uniqueCandidates.map(stripPrivateFields),
   };
 }
 

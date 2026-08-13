@@ -18,7 +18,9 @@ description: 口播视频转录和口误识别。生成审查稿和删除任务�
 ```
 output/YYYY-MM-DD_HH-MM_视频名/剪口播/
 ├── 1_转录/   audio.mp3 · volcengine_v3_result.json · subtitles_words.json
-├── 2_分析/   analysis.txt · sentence_map.json · restart_candidates.json · speech_errors.json · auto_selected.json
+├── 2_分析/   analysis.txt · sentence_map.json · restart_candidates.json · auto_selected.json
+│               review_chunks.json（长视频分段合同）
+│               chunks/<chunk-id>/speech_errors.json（每批语义分析结果）
 ├── 3_审核/   review.html · audio.mp3 · data.json · silence_periods.json · review_log.json
 │               <视频名>_cut.fcpxml   ← 网页点击「导出 FCPXML」后生成在此目录
 │                                      拖入剪映 / Final Cut Pro 完成最终剪辑
@@ -46,6 +48,7 @@ output/YYYY-MM-DD_HH-MM_视频名/剪口播/
 
 模式 A（剪口播）:
   5.1 gen_analysis.js（含同句 / 邻句重说待审线索）
+  5.1.5 >2 分钟时规划约 2 分钟的完整审核批次，并先初始化流式审核页
   5.2 读规则.md + 经验规则.md + analysis.txt + restart_candidates.json
   5.3 AI 判断整句口误 → speech_errors.json（只填 delete_sentences）
   5.4 auto_filler.js → 自动补充词级口癖 idx（快速预筛）
@@ -156,12 +159,64 @@ node "$SKILL_DIR/scripts/gen_analysis.js" \
 # 输出: analysis.txt + sentence_map.json + restart_candidates.json + auto_selected.json
 ```
 
+#### 5.1.5 长视频流式审核（转录完成后立即分批交付）
+
+转录本身仍然一次完成；当时间轴 **超过 120 秒**，不要等待全文语义分析结束才生成审核页。先规划审核批次：
+
+```bash
+node "$SKILL_DIR/scripts/plan_review_chunks.js" \
+  "$BASE_DIR/1_转录/subtitles_words.json" \
+  "$BASE_DIR/2_分析/sentence_map.json" \
+  "$BASE_DIR/2_分析/restart_candidates.json" \
+  "$BASE_DIR/2_分析/review_chunks.json"
+```
+
+分段合同的默认值是目标 120 秒、可在 90–150 秒内让位给完整句子与自然停顿。规划器优先选 `≥0.4 秒` 的停顿，避开已发现的重录候选、`321 / 三二一 / 停` 附近；找不到安全位置时宁可略超目标，也**绝不**从一个句子或一个字中间切开。
+
+- 输出 `mode: "single"`：视频不超过两分钟，沿用原来的步骤 5.2–6（全文分析 → 一次性审核页）。
+- 输出 `mode: "streaming"`：先立即初始化同一个完整时间轴的审核页数据，再按批处理语义分析：
+
+```bash
+# 只在 review_chunks.json 的 mode=streaming 时运行；先准备可持续更新的审核页。
+node "$SKILL_DIR/scripts/generate_review.js" \
+  "$BASE_DIR/1_转录/subtitles_words.json" \
+  "$BASE_DIR/2_分析/auto_selected.json" \
+  "$BASE_DIR/1_转录/audio.mp3" \
+  "$BASE_DIR/3_审核" \
+  --stream-manifest "$BASE_DIR/2_分析/review_chunks.json"
+```
+
+每个 chunk 的 `core` 是它唯一可写入删除标的完整句子范围；`context` 只用于理解前后重说，**不能**把选择写到相邻批次。按 `order` 逐批执行与步骤 5.2–5.5 相同的语义判断，并将本批结果写到：
+
+```text
+$BASE_DIR/2_分析/chunks/<chunk-id>/speech_errors.json
+```
+
+每批写完后用下面的命令发布。它会在本批 core 范围内自动补充低风险口癖，校验越界选择，并原子更新审核页；不要在流式模式下再运行全文 `auto_filler.js` 或 `merge_selections.js`。
+
+```bash
+node "$SKILL_DIR/scripts/publish_review_chunk.js" \
+  "$BASE_DIR/2_分析" \
+  "$BASE_DIR/3_审核" \
+  "chunk-001" \
+  "$BASE_DIR/2_分析/chunks/chunk-001/speech_errors.json"
+```
+
+首批发布后立刻启动审核服务器，剪辑同学即可开始回听：
+
+```bash
+bash "$SKILL_DIR/scripts/serve_review.sh" \
+  "$BASE_DIR/3_审核" "$VIDEO_PATH" "$SKILL_DIR/scripts/review_server.js"
+```
+
+审核页每约 1.2 秒读取版本化状态，后续批次完成后自动加入，且不会覆盖剪辑同学已经手动增删的选择。所有批次完成前导出按钮保持锁定；服务端也会拒绝不完整导出。全部批次 `ready` 后，导出仍是同一份完整 FCPXML 与 `review_log.json`。
+
 #### 5.2 读取规则 + 分析文件
 
-读 `用户习惯/规则.md`、`用户习惯/经验规则.md`（自进化沉淀的个人偏好，见步骤 8）、`analysis.txt` 和 `restart_candidates.json`。
+读 `用户习惯/规则.md`、`用户习惯/经验规则.md`（自进化沉淀的个人偏好，见步骤 8）、`analysis.txt` 和 `restart_candidates.json`。流式模式还必须读取当前 chunk 的 `core` 与 `context`：全文上下文只用于判断，删除标只能写入该 chunk 的 `core`。
 两份规则都要遵守；冲突时以更具体、更新的为准。
 
-`restart_candidates.json` 是脚本根据“前短后长”的重复锚点产生的**待审核线索**，可能来自同一句，也可能来自相邻 1–3 句。它不是删除任务：每条都必须回听并做语义确认；`suggestedDelete` 只是初始锚点，必要时结合 `sourceSentenceRange` 缩放到草稿的真实起止。只有前段确实是草稿/残句、后段更完整时，才把确认后的 idx 写进 `speech_errors.json`；普通重复、列举、固定说法或不确定的情况不打删除标。
+`restart_candidates.json` 是脚本根据“前短后长”的重复锚点产生的**待审核线索**，可能来自同一句、相邻 1–3 句，或被录制口令 `321 / 三二一` 分隔的非邻句重说。口令分隔候选会带 `recordingCue.strength: "strong"`，但仍不是删除任务：每条都必须回听并做语义确认；`suggestedDelete` 只是初始锚点，必要时结合 `sourceSentenceRange` 缩放到草稿的真实起止。只有前段确实是草稿/残句、后段更完整且前段不含独有信息时，才把确认后的 idx 写进 `speech_errors.json`；普通重复、列举、固定说法或不确定的情况不打删除标。
 
 `analysis.txt` 格式（每行一句，序号: 文本）：
 ```
@@ -185,7 +240,7 @@ node "$SKILL_DIR/scripts/gen_analysis.js" \
 }
 ```
 
-#### 5.4 脚本自动识别词级口癖（无需 AI）
+#### 5.4 脚本自动识别词级口癖（无需 AI，单段模式）
 
 ```bash
 node "$SKILL_DIR/scripts/auto_filler.js" \
@@ -196,20 +251,21 @@ node "$SKILL_DIR/scripts/auto_filler.js" \
 
 脚本会**就地修改** `speech_errors.json`，把识别到的口癖 idx 合并进 `delete_idx`：
 
+- 录制口令：`321 / 三二一`。转录阶段会把与正文黏连的口令拆成独立词级原子，脚本只预选口令 idx，绝不连带删除后面的正文；疑似事实数值（如 `321年`）不自动删除。
 - 任意位置：`呃 / 嗯 / 额 / 诶 / 欸 / 唉 / 噢`（已排除"额外/金额"等真词）
-- 任意位置的：`然后`（用户偏好：宁可手动加回）
-- 句首过渡词：`然后 / 那么 / 好的 / 哦 / 哎 / 呀 / 对 / 那`（"那"会避开"那个/那么/那里"等）
+- 句首过渡词：`那么 / 好的 / 哦 / 哎 / 呀 / 对 / 那`（"那"会避开"那个/那么/那里"等）
 - 句尾废词：`对 / 哦`
+- `然后` 不由自动层删除：表达真实先后、因果或操作顺序时必须保留；只有语义层明确确认其完全无功能时，才可人工预选删除。
 - 自然语气词「啊」「呢」默认由经验规则保护；仅在语义分析确认它独立成句、连续堆叠、明显卡顿或明显无功能时才标记删除。不得仅因「呢」处于句首/句尾而删除。
 - 跳过已整句删除的句子；保护剩余字数 ≤3-4 的短句不被掏空
 
-跑完后，用户已手工填的 idx 也会被保留（合并去重）。
+跑完后，用户已手工填的 idx 也会被保留（合并去重）。流式模式不在此处跑全文脚本；`publish_review_chunk.js` 会携带本批的 `--sentence-range` 自动完成相同预筛，避免后续批次提前写入审核页。
 
 #### 5.5 AI 逐句扫剩余词级口癖（脚本覆盖不到的部分）
 
 脚本只处理"无需上下文判断"的安全口癖。AI 在此结合 `analysis.txt` 与 `restart_candidates.json`，找出脚本覆盖不到的：
 
-- **B4 同句 / 邻句重说**（优先级最高）：前半段说错、说到一半或较短草稿，后半段 / 后句以同主题更完整地重说 → 在确认后删前半段，保留后半段。`restart_candidates.json` 只提供重复锚点和建议范围，不能跳过语义确认直接删除。
+- **B4 同句 / 邻句 / 口令分隔重说**（优先级最高）：前半段说错、说到一半或较短草稿，后半段 / 后句以同主题更完整地重说 → 在确认后删前半段，保留后半段。若 `321 / 三二一` 夹在两版近似表达之间，即使两句并非紧邻，也把它当作强分隔信号；仍须确认后一版更完整、前一版无独有信息。`restart_candidates.json` 只提供重复锚点和建议范围，不能跳过语义确认直接删除。
 - **B3 冗余引导短语**：大家可以看到、你看、给大家看一下、比如说你看一下、我可以告诉你、你明白吗
 - **B2 句中填充词**（**慎用**，需明确判断为口癖才删）：其实、就、也、大概、这个、那个、就是
 - **B5 脚本未覆盖的句尾拖音**
@@ -229,7 +285,7 @@ node "$SKILL_DIR/scripts/gen_word_detail.js" \
 
 **判断尺度**：句子已经能读通就不要再动。剪口播的容错来自审核网页（用户能取消勾选），但**误删比漏删难恢复**——用户得手动取消勾选才能找回。所以**漏删优于过删**。
 
-#### 5.6 合并到 auto_selected（代码自动映射句号→idx）
+#### 5.6 合并到 auto_selected（代码自动映射句号→idx，单段模式）
 
 ```bash
 node "$SKILL_DIR/scripts/merge_selections.js" \
@@ -238,7 +294,7 @@ node "$SKILL_DIR/scripts/merge_selections.js" \
   "$BASE_DIR/2_分析/auto_selected.json"
 ```
 
-### 步骤 6-7: 生成审核数据并启动服务器
+### 步骤 6-7: 生成审核数据并启动服务器（单段模式）
 
 ```bash
 # 6. 生成 data.json + review.html（从 templates/review.html 复制）
@@ -260,6 +316,7 @@ bash "$SKILL_DIR/scripts/serve_review.sh" \
 ### 步骤 7A：完整模型 A/B（显式确认后才运行）
 
 > 只在用户明确要求比较不同 ASR 的**完整剪口播效果**时运行。不能拿「1.0 完整链路」和「2.0 裸转录」比较；两组必须只替换 ASR，其余规则、口误分析、审核和切点参数完全相同。
+> 完整 A/B 为保证两组严格可比，固定使用完整单段审核流程，不启用流式增量状态。
 
 1. **先验证资源**：录音文件识别 2.0 是可选资源，完整 A/B 前运行：
 
@@ -453,7 +510,7 @@ node "$SKILL_DIR/scripts/apply_fact_corrections.js" "$BASE_DIR/4_字幕"
 
 1. 读取纠错后的文本：直接模式为 `$BASE_DIR/2_纠错/corrected.txt`；审核后成片字幕在有人工批准的事实修改时读取 `$BASE_DIR/4_字幕/fact_checked.txt`，否则读取 `$BASE_DIR/4_字幕/corrected.txt`
 2. 读取 `$SKILL_DIR/用户习惯/断行prompt.md` 规则
-3. 沿用 B-2 已确认的展示模式。**只做格式化**，不改字、不删字、不加字；默认每行最多 10 个中文字量，英文专有名词不得从单词中间强拆。默认模式删除标点；正式成片字幕模式保留 B-2 已确认写入的千位逗号、书名号和引用号。
+3. 沿用 B-2 已确认的展示模式。**只做主字幕格式化**，不改字、不删字、不加字、不调序；不得默认删低价值铺垫、复制花字或抽取冷开场。按 `断行prompt.md` 在完整句群上做全局语义断行，遵守其 L1/L2 单元、题眼和交付宽度规则；没有交付 profile 时采用 14 字软上限、7–10 字目标。默认模式删除标点；正式成片字幕模式保留 B-2 已确认写入的千位逗号、书名号和引用号。
 4. 输出到：直接模式为视频所在目录 `$(dirname "$VIDEO_PATH")/subtitles_formatted.md`；审核后成片字幕为 `$BASE_DIR/4_字幕/subtitles_formatted.md`
 5. 告知用户文件路径，流程结束
 

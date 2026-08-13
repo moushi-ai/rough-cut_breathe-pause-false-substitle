@@ -53,6 +53,23 @@ assert(
   '应容忍少量 ASR 代词差异和语气词插入，找出隔句的完整重说',
 );
 
+const cueSeparated = makeWords([
+  '这家公司一开始只做基础的软件外包',
+  '中间先说了一句草稿',
+  '321',
+  '又插入了一句无关的话',
+  '这家公司一开始只做基础的软件外包后来又做产品',
+]);
+const cueSeparatedCandidate = detectRestartCandidates(cueSeparated).candidates.find(candidate => (
+  candidate.kind === 'cue-separated-restart' &&
+  candidate.sourceSentence === 0 &&
+  candidate.restartSentence === 4
+));
+assert(cueSeparatedCandidate, '被 321 分隔的非邻句前短后长重说必须产生待审核候选');
+assert.strictEqual(cueSeparatedCandidate.recordingCue.strength, 'strong');
+assert.strictEqual(cueSeparatedCandidate.recordingCue.text, '321');
+assert(cueSeparatedCandidate.reviewInstruction.includes('不得跳过语义确认'), '口令分隔也必须保持语义审核，不得自动删除');
+
 const inline = makeWords(['这个方案我们先做一个小版本这个方案我们先做一个小版本再上线验证']);
 const inlineResult = detectRestartCandidates(inline);
 assert(
